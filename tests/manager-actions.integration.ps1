@@ -335,7 +335,7 @@ try {
   [System.IO.File]::WriteAllText($themePath, $originalThemeJson, [System.Text.Encoding]::UTF8)
   Write-Host 'PASS: saved theme editing supports missing optional art fields'
 
-  Assert-Equal '1.7' $after.managerApiVersion 'Manager API version is missing.'
+  Assert-Equal '1.8' $after.managerApiVersion 'Manager API version is missing.'
   Assert-Equal '1' $after.themeSchemaVersion 'Theme schema version is missing.'
   Assert-True (@($after.supportedActions) -contains 'ValidateImage') 'Supported actions do not include ValidateImage.'
   Assert-True (@($after.supportedActions) -contains 'ResetTheme') 'Supported actions do not include ResetTheme.'
@@ -493,6 +493,8 @@ try {
   [System.IO.File]::WriteAllText($unmarkedSentinel, 'keep', [System.Text.Encoding]::UTF8)
   $null = Invoke-Manager -Arguments (@('-Action', 'Status') + $common)
   Assert-True (Test-Path -LiteralPath $unmarkedSentinel -PathType Leaf) 'Status deleted an unmarked directory that only matched the quarantine name prefix.'
+  $null = Invoke-Manager -Arguments (@('-Action', 'Pause') + $common)
+  Assert-True (Test-Path -LiteralPath $unmarkedSentinel -PathType Leaf) 'Write cleanup deleted an unmarked directory.'
   Write-Host 'PASS: pending cleanup requires a valid manager quarantine marker'
 
   $pendingCleanupTheme = Join-Path $stateRoot 'themes\pending-cleanup-delete-test'
@@ -543,6 +545,8 @@ try {
         Set-Acl -LiteralPath $quarantinedImage -AclObject $cleanupAcl
       }
       $null = Invoke-Manager -Arguments (@('-Action', 'Status') + $common)
+      Assert-True (Test-Path -LiteralPath $pendingQuarantine.FullName) 'Status must not perform pending cleanup.'
+      $null = Invoke-Manager -Arguments (@('-Action', 'Pause') + $common)
       Assert-True (-not (Test-Path -LiteralPath $pendingQuarantine.FullName)) 'A later manager invocation did not retry pending quarantine cleanup.'
     }
   }
@@ -577,6 +581,8 @@ try {
         $env:CODEX_DREAM_SKIN_TEST_FAIL_FINAL_QUARANTINE_REMOVE = $previousFinalFailure
       }
       $null = Invoke-Manager -Arguments (@('-Action', 'Status') + $common)
+      Assert-True (Test-Path -LiteralPath $finalQuarantine.FullName) 'Status must not perform pending cleanup.'
+      $null = Invoke-Manager -Arguments (@('-Action', 'Pause') + $common)
       Assert-True (-not (Test-Path -LiteralPath $finalQuarantine.FullName)) 'Final quarantine marker was not retried after directory deletion became available.'
     }
     if ($null -eq $previousFinalFailure) {
