@@ -16,7 +16,9 @@
   --ds-bg-rgb: 17 19 24;
   --ds-panel-rgb: 25 28 34;
   --ds-panel-2-rgb: 32 36 43;
-  /* Shared interface surface settings. Change background alpha, never element
+  /* Window tint is independent of the floating-panel opacity setting. */
+  --ds-shell-background: rgb(var(--ds-bg-rgb) / .58);
+  /* Shared floating surface settings. Change background alpha, never element
      opacity: text, icons, images and semantic highlights must stay opaque. */
   --ds-surface-opacity: .80;
   --ds-surface-blur: 10px;
@@ -69,6 +71,7 @@
 
 html[data-dream-skin="active"][data-dream-shell="light"] {
   color-scheme: light !important;
+  --ds-shell-background: rgb(var(--ds-panel-rgb) / .64);
   --ds-bg: #f3f5f6;
   --ds-panel: #fafbfb;
   --ds-panel-2: #e9edef;
@@ -143,6 +146,27 @@ html[data-dream-skin="active"] {
     backdrop-filter: none !important;
   }
 
+  /* Shell surfaces never consume the panel slider or its backdrop blur.
+     Nested neutral navigation wrappers remain clear via the normal binder. */
+  html[data-dream-skin="active"] [data-ds-surface="shell"] {
+    background: var(--ds-shell-background) !important;
+    backdrop-filter: none !important;
+  }
+
+  /* The sidebar resize extension must not repeat its background. */
+  html[data-dream-skin="active"] [data-ds-part="sidebar"]::after {
+    background: transparent !important;
+  }
+
+  /* 26.924 summary section titles are sticky headers with an opaque ::before
+     strip. The enclosing summary panel already paints the configured glass;
+     do not stack another surface/blur on its titles or their top padding. */
+  html[data-dream-skin="active"] [data-summary-panel-variant] header.sticky,
+  html[data-dream-skin="active"] [data-summary-panel-variant] header.sticky::before {
+    background: transparent !important;
+    backdrop-filter: none !important;
+  }
+
   html[data-dream-skin="active"] [data-ds-surface] {
     --app-shell-panel-background: transparent !important;
     --color-codex-terminal-background: transparent !important;
@@ -163,6 +187,55 @@ html[data-dream-skin="active"] {
 
   html[data-dream-skin="active"] [data-ds-surface] :is(.xterm, .xterm-viewport) {
     background-color: transparent !important;
+  }
+}
+
+/* Full-window artwork has one tint plane above the image/video and below
+   the entire interface. Do not paint separate sidebar/main gradients: those
+   restart at each boundary and leave the application menu visibly brighter.
+   Retain local artwork and task-mode=off behavior for existing themes. */
+@layer dreamskin-surfaces {
+  html[data-dream-skin="active"][data-dream-art-wide="true"]:not([data-dream-task-mode="off"]) body {
+    position: relative;
+    z-index: 0;
+    isolation: isolate;
+  }
+
+  html[data-dream-skin="active"][data-dream-art-wide="true"]:not([data-dream-task-mode="off"]) body::before {
+    content: "" !important;
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: var(--ds-shell-background);
+  }
+
+  /* Home showcases the artwork with a lighter window-wide tint. The home
+     part disappears on entering a conversation, restoring the existing tint.
+     Fade only this decorative plane, never the UI or floating panels. */
+  html[data-dream-skin="active"][data-dream-art-wide="true"]:not([data-dream-task-mode="off"])
+    body:has([data-ds-part="home"])::before {
+    opacity: .55;
+  }
+
+  html[data-dream-skin="active"][data-dream-art-wide="true"]:not([data-dream-task-mode="off"]) #codex-dream-skin-video {
+    z-index: -2 !important;
+  }
+
+  html[data-dream-skin="active"][data-dream-art-wide="true"]:not([data-dream-task-mode="off"]) :is(
+    [data-ds-part="sidebar"], [data-ds-part="main"],
+    [data-ds-part="home"], [data-ds-part="header"],
+    [class~="group/application-menu-top-bar"], [class*="_ApplicationMenuTopBar_"]
+  ) {
+    background: transparent !important;
+    backdrop-filter: none !important;
+    box-shadow: none !important;
+  }
+
+  html[data-dream-skin="active"][data-dream-art-wide="true"]:not([data-dream-task-mode="off"]) :is(
+    [data-ds-part="main"], [data-ds-part="home"]
+  )::before {
+    content: none !important;
   }
 }
 
@@ -294,6 +367,17 @@ html[data-dream-skin="active"][data-dream-media="video"]:is([data-dream-video-hi
 
 html[data-dream-skin="active"] body::before {
   content: none;
+}
+
+/* The unified 26.924 page shell reserves a narrow bottom/end gutter around
+   native cards. Wide skins flatten those cards into a continuous canvas, so
+   remove that gutter too; retain titlebar spacing and native window borders.
+   The module prefix is shared across platforms, independent of its hash. */
+html[data-dream-skin="active"][data-dream-art-wide="true"]
+  [class*="_PageSurfaceLayout_"]:has(main[data-app-shell-main-surface="default"]) {
+  --app-shell-page-inline-end-inset: 0px !important;
+  padding-inline-end: 0 !important;
+  padding-block-end: 0 !important;
 }
 
 html[data-dream-skin="active"] aside.app-shell-left-panel {
@@ -1320,6 +1404,15 @@ html[data-dream-skin="active"] main:is(.main-surface, [data-app-shell-main-surfa
   background-image: none !important;
 }
 
+/* 26.924 places its fade in a sticky spacer inside the thread scroll area,
+   separate from the composer footer. Scope to that area and decorative node;
+   clear paint only, preserving the editor, controls and native positioning. */
+html[data-dream-skin="active"] main:is(.main-surface, [data-app-shell-main-surface], [class*="_MainContentSurface_"])
+  .thread-scroll-container
+  [aria-hidden="true"][class~="pointer-events-none"][class~="absolute"][class~="bottom-0"][class~="bg-gradient-to-t"][class~="from-surface"][class~="via-surface"] {
+  background: transparent !important;
+}
+
 /* Native wide blocks escape the prose column with negative inline margins.
    Keep tables inside the themed message and delegate width overflow to the
    existing horizontal scroller. */
@@ -1435,9 +1528,11 @@ html[data-dream-skin="active"][data-dream-art-wide="true"] main:is(.main-surface
   border-top: 0 !important;
 }
 
+/* Codex 26.924 puts the fade state attribute on the content container, not
+   just the decorative fade. Clear paint only: even a future selector drift
+   must never hide the chat/composer subtree or alter its native layout. */
 html[data-dream-skin="active"][data-dream-art-wide="true"] main:is(.main-surface, [data-app-shell-main-surface], [class*="_MainContentSurface_"])
-  :is(.app-shell-main-content-top-fade, [data-app-shell-main-content-top-fade], [class*="_MainContentTopFade_"]) {
-  display: none !important;
+  :is(.app-shell-main-content-top-fade, [class*="_MainContentTopFade_"], [data-app-shell-main-content-top-fade]:empty) {
   background: transparent !important;
 }
 

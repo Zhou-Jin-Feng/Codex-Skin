@@ -69,6 +69,7 @@ struct ThemeSettingsView: View {
             Picker("任务页模式", selection: $taskMode) { Text("自动").tag("auto"); Text("氛围").tag("ambient"); Text("横幅").tag("banner"); Text("完整").tag("full"); Text("关闭").tag("off") }
             setting("消息气泡不透明度", value: $bubble, range: 0...1)
             setting("工具面板不透明度", value: $surface, range: 0...1)
+              .help("用于输入框、右侧浮层和设置等独立面板；不影响侧栏、顶部菜单栏、聊天区整体底色、文字和消息气泡。")
           }
           Section("自定义取景") {
             Toggle("启用自定义取景", isOn: $framing)

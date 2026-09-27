@@ -639,7 +639,7 @@ namespace CodexDreamSkinManager
             surfaceOpacityValue = new TextBlock { Text = "80%", Foreground = MutedBrush, HorizontalAlignment = HorizontalAlignment.Right };
             fields.Children.Add(SliderLabel("面板不透明度（输入框、工具面板等）", surfaceOpacityValue));
             surfaceOpacitySlider = CreateSlider(0, 100, 80, 1, "SurfaceOpacitySlider");
-            surfaceOpacitySlider.ToolTip = "0% 完全透明，100% 不透明；不影响文字和消息气泡。保存主题后生效。";
+            surfaceOpacitySlider.ToolTip = "用于输入框、右侧浮层和设置等独立面板；不影响侧栏、顶部菜单栏、聊天区整体底色、文字和消息气泡。0% 完全透明，100% 不透明。保存主题后生效。";
             surfaceOpacitySlider.ValueChanged += FramingChanged;
             fields.Children.Add(surfaceOpacitySlider);
 
@@ -748,7 +748,7 @@ namespace CodexDreamSkinManager
             savedSurfaceOpacityValue = new TextBlock { Text = "80%", Foreground = MutedBrush, HorizontalAlignment = HorizontalAlignment.Right };
             fields.Children.Add(SliderLabel("面板不透明度（输入框、工具面板等）", savedSurfaceOpacityValue));
             savedSurfaceOpacitySlider = CreateSlider(0, 100, 80, 1, "SavedSurfaceOpacitySlider");
-            savedSurfaceOpacitySlider.ToolTip = "0% 完全透明，100% 不透明；不影响文字和消息气泡。保存主题后生效。";
+            savedSurfaceOpacitySlider.ToolTip = "用于输入框、右侧浮层和设置等独立面板；不影响侧栏、顶部菜单栏、聊天区整体底色、文字和消息气泡。0% 完全透明，100% 不透明。保存主题后生效。";
             savedSurfaceOpacitySlider.ValueChanged += SavedThemeFramingChanged;
             fields.Children.Add(savedSurfaceOpacitySlider);
 
