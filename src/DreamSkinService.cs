@@ -295,6 +295,14 @@ namespace CodexDreamSkinManager
             }
         }
 
+        // True only when the recorded injector and browser session are both
+        // verifiably alive; false means "unknown", never "broken".
+        public Task<bool> IsLiveSessionHealthyAsync()
+        {
+            string skillRoot = Path.Combine(rootDirectory, "windows");
+            return Task.Run(() => LiveSessionProbe.IsHealthy(skillRoot));
+        }
+
         public async Task<bool> ApplyThemeAsync(ThemeOption theme, bool deferLiveApply = false)
         {
             List<ScriptArgument> args = new List<ScriptArgument>();

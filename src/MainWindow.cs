@@ -1372,6 +1372,28 @@ namespace CodexDreamSkinManager
             bool applied = await RunNamedOperationAsync(async delegate
             {
                 SetMessage("正在读取连接状态...", false);
+                // A verified live session takes the fast path: the apply script
+                // re-checks the injector identity itself, and a failed live apply
+                // still falls through to the startup reconciliation below.
+                if (!restart && await service.IsLiveSessionHealthyAsync())
+                {
+                    SetMessage("正在应用主题...", false);
+                    if (await service.ApplyThemeAsync(theme, false))
+                    {
+                        SetExpectedRuntimeState(true, false);
+                        return;
+                    }
+                    bool reconnectAuthorized;
+                    try { reconnectAuthorized = await ConfirmStartupIfRequiredAsync("恢复皮肤连接", false); }
+                    catch (OperationCanceledException)
+                    {
+                        throw new OperationCanceledException("主题已保存，已取消恢复连接；尚未确认皮肤显示。请重新应用主题。");
+                    }
+                    SetMessage("正在连接皮肤服务并确认显示...", false);
+                    await service.StartAsync(reconnectAuthorized);
+                    SetExpectedRuntimeState(true, false);
+                    return;
+                }
                 // The manager may have stayed open while Codex exited or restarted.
                 currentStatus = await service.GetStatusAsync();
                 ActionAvailability availability = ActionAvailability.FromStatus(currentStatus, false, true, hasValidCustomImage);
