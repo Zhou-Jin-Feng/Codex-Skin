@@ -70,14 +70,19 @@ $operationLock = $null
 $startFailureCategory = 'internal-start-failure'
 $appearanceTransaction = $null
 $appearanceRecovery = 'not-needed'
+$timingMode = if ($CheckOnly) { 'check' } elseif ($ConnectOnly) { 'connect' } else { 'start' }
+if ($RestartExisting) { $timingMode += ' (restart authorized)' }
+Start-DreamSkinTiming -Source 'start-dream-skin' -Operation $timingMode -StateRoot $StateRoot
 try {
   $operationLock = Enter-DreamSkinOperationLock `
     -TimeoutMilliseconds $OperationLockTimeoutMilliseconds
+  Write-DreamSkinTimingMark -Stage 'operation lock acquired'
   Assert-DreamSkinPort -Port $Port
   if ($ProfilePath) { $ProfilePath = [System.IO.Path]::GetFullPath($ProfilePath) }
   $node = Get-DreamSkinNodeRuntime
   $currentCodex = Get-DreamSkinCodexInstall
   $codex = $currentCodex
+  Write-DreamSkinTimingMark -Stage 'node runtime and codex install resolved'
   $language = Resolve-DreamSkinLanguage -StateRoot $StateRoot
   $themePaths = Get-DreamSkinThemePaths -StateRoot $StateRoot
   if (-not $CheckOnly) { Ensure-DreamSkinManagedDirectory -Path $themePaths.Root -Root $themePaths.Root }
@@ -181,10 +186,13 @@ try {
     Get-DreamSkinCodexProcesses -Codex $codexToStop
   }
   $closedExistingCodex = $false
+  Write-DreamSkinTimingMark -Stage "cdp checked (debug ready: $debugReady, codex processes: $($codexProcesses.Count))"
   if ($CheckOnly) {
     if (-not $debugReady -and $codexProcesses.Count -gt 0) {
+      Write-DreamSkinTimingMark -Stage 'restart required'
       throw 'DREAM_SKIN_RESTART_REQUIRED: Codex must restart before Dream Skin can connect.'
     }
+    Write-DreamSkinTimingMark -Stage 'done'
     return
   }
   if (-not $debugReady -and $codexProcesses.Count -gt 0) {
@@ -203,6 +211,7 @@ try {
     Stop-DreamSkinCodex -Codex $codexToStop -AllowForce
     $closedExistingCodex = $true
     $codex = $currentCodex
+    Write-DreamSkinTimingMark -Stage 'existing codex closed'
   }
 
   $launchedWithCdp = $false
@@ -265,6 +274,7 @@ try {
       $debugLaunch = Start-DreamSkinCodexForDebugging -Codex $codex -Arguments $arguments `
         -Port $Port -PreserveProcessIds $debugLaunchBaselineProcessIds
       $launchedWithCdp = $true
+      Write-DreamSkinTimingMark -Stage "codex launched ($($debugLaunch.Strategy))"
       if ($debugLaunch.Strategy -eq 'direct-store-executable') {
         Write-Warning 'Codex package activation did not preserve the CDP arguments; using the validated Store executable fallback for this session.'
       }
@@ -288,8 +298,10 @@ try {
       Start-Sleep -Milliseconds 200
       $cdpIdentity = Get-DreamSkinVerifiedCdpIdentity -Port $Port -Codex $codex
     }
+    Write-DreamSkinTimingMark -Stage 'cdp endpoint ready'
   } catch {
     $launchError = $_
+    Write-DreamSkinTimingMark -Stage 'launch failed'
     if ($debugLaunchAttempted) {
       try {
         Stop-DreamSkinCodex -Codex $codex `
@@ -379,6 +391,7 @@ try {
       createdAt = (Get-Date).ToUniversalTime().ToString('o')
     }
     Write-DreamSkinState -Path $StatePath -State $connectionState
+    Write-DreamSkinTimingMark -Stage 'done'
     return
   }
 
@@ -501,6 +514,7 @@ try {
       -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
     Start-Sleep -Milliseconds 250
     if ($daemon.HasExited) { throw "The injector exited during startup. See $StderrPath" }
+    Write-DreamSkinTimingMark -Stage 'injector started'
 
     $injectorStartedAt = Get-DreamSkinProcessStartedAt -ProcessId $daemon.Id
     if (-not $injectorStartedAt) { throw 'The injector process identity could not be recorded safely.' }
@@ -547,6 +561,7 @@ try {
         '--browser-id', $cdpIdentity.BrowserId, '--theme-dir', $themePaths.Active,
         '--timeout-ms', "$verifyTimeoutMs")
       Write-DreamSkinUtf8FileAtomically -Path $VerifyPath -Content (($verify.Output -join "`r`n") + "`r`n")
+      Write-DreamSkinTimingMark -Stage "verify attempt (exit $($verify.ExitCode))"
       if ($verify.ExitCode -eq 0) { break }
       # A verify can fail while the theme is demonstrably on screen: the
       # renderer reports the document visible, the viewport sized and the shell
@@ -575,18 +590,21 @@ try {
         if (Test-DreamSkinRenderedVerificationOutput -Output $once.Output) {
           $skinLooksRendered = $true
         }
+        Write-DreamSkinTimingMark -Stage "forced apply after verify failure (exit $($once.ExitCode))"
         if ($once.ExitCode -eq 0) { break }
       }
       if ($daemon.HasExited) { throw "The injector exited during startup. See $StderrPath" }
       if ((Get-Date) -ge $verifyDeadline) { throw "Dream Skin verification failed. See $VerifyPath" }
       Start-Sleep -Seconds 1
     }
+    Write-DreamSkinTimingMark -Stage 'renderer verified'
     if ($null -ne $appearanceTransaction) {
       Complete-DreamSkinAppearanceTransaction `
         -BackupPath $BackupPath -Transaction $appearanceTransaction
     }
   } catch {
     $startupError = $_
+    Write-DreamSkinTimingMark -Stage "startup failed, rolling back (skin rendered: $skinLooksRendered)"
     # We own the daemon Process object, so stop it directly: the object is
     # immune to PID reuse, and identity re-validation cannot spuriously
     # refuse.  Slow machines also need more than a moment for teardown; a
@@ -712,8 +730,10 @@ try {
     Write-DreamSkinStartResult -StateRoot $StateRoot -Token $ResultToken `
       -Outcome 'success' -Category 'none' -AppearanceRecovery $appearanceRecovery
   }
+  Write-DreamSkinTimingMark -Stage 'done'
 } catch {
   $startError = $_
+  Write-DreamSkinTimingMark -Stage "failed ($startFailureCategory)"
   if ($ResultToken) {
     try {
       $reportedCategory = Get-DreamSkinStartFailureCategory `

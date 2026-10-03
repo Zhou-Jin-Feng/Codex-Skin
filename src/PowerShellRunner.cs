@@ -75,38 +75,48 @@ namespace CodexDreamSkinManager
                 info.StandardOutputEncoding = Encoding.UTF8;
                 info.StandardErrorEncoding = Encoding.Default;
 
-                using (Process process = Process.Start(info))
+                Stopwatch stopwatch = Stopwatch.StartNew();
+                string outcome = "failed to start";
+                try
                 {
-                    Stopwatch stopwatch = Stopwatch.StartNew();
-                    Task<string> outputTask = ReadScriptOutputAsync(process.StandardOutput, completionMarker);
-                    Task<string> errorTask = ReadScriptOutputAsync(process.StandardError, completionMarker);
-                    if (!process.WaitForExit(timeoutMilliseconds))
+                    using (Process process = Process.Start(info))
                     {
-                        try { if (!process.HasExited) process.Kill(); } catch { }
-                        process.WaitForExit(5000);
-                        throw new TimeoutException(string.Format(CultureInfo.InvariantCulture,
-                            "操作执行超时（{0}，等待 {1} 秒）。操作结果尚未确认，请刷新状态。",
-                            operation, timeoutMilliseconds / 1000.0));
+                        Task<string> outputTask = ReadScriptOutputAsync(process.StandardOutput, completionMarker);
+                        Task<string> errorTask = ReadScriptOutputAsync(process.StandardError, completionMarker);
+                        if (!process.WaitForExit(timeoutMilliseconds))
+                        {
+                            outcome = "timeout";
+                            try { if (!process.HasExited) process.Kill(); } catch { }
+                            process.WaitForExit(5000);
+                            throw new TimeoutException(string.Format(CultureInfo.InvariantCulture,
+                                "操作执行超时（{0}，等待 {1} 秒）。操作结果尚未确认，请刷新状态。",
+                                operation, timeoutMilliseconds / 1000.0));
+                        }
+                        int remainingMilliseconds = Math.Max(0,
+                            timeoutMilliseconds - (int)Math.Min(stopwatch.ElapsedMilliseconds, int.MaxValue));
+                        int exitCode = process.ExitCode;
+                        outcome = "exit " + exitCode.ToString(CultureInfo.InvariantCulture);
+                        if (!Task.WaitAll(new Task[] { outputTask, errorTask }, Math.Min(2000, remainingMilliseconds)))
+                            throw new TimeoutException(string.Format(CultureInfo.InvariantCulture,
+                                "脚本已退出，但输出未完整回收（{0}，退出码 {1}）。请刷新状态确认操作结果。",
+                                operation, exitCode));
+                        ScriptResult result = new ScriptResult();
+                        result.ExitCode = exitCode;
+                        result.Output = outputTask.Result.Trim();
+                        result.Error = NormalizePowerShellError(errorTask.Result);
+                        if (result.ExitCode != 0)
+                        {
+                            string encodedError = ExtractEncodedError(result.Output);
+                            throw new InvalidOperationException(!string.IsNullOrWhiteSpace(encodedError)
+                                ? encodedError
+                                : (string.IsNullOrWhiteSpace(result.Error) ? result.Output : result.Error));
+                        }
+                        return result;
                     }
-                    int remainingMilliseconds = Math.Max(0,
-                        timeoutMilliseconds - (int)Math.Min(stopwatch.ElapsedMilliseconds, int.MaxValue));
-                    int exitCode = process.ExitCode;
-                    if (!Task.WaitAll(new Task[] { outputTask, errorTask }, Math.Min(2000, remainingMilliseconds)))
-                        throw new TimeoutException(string.Format(CultureInfo.InvariantCulture,
-                            "脚本已退出，但输出未完整回收（{0}，退出码 {1}）。请刷新状态确认操作结果。",
-                            operation, exitCode));
-                    ScriptResult result = new ScriptResult();
-                    result.ExitCode = exitCode;
-                    result.Output = outputTask.Result.Trim();
-                    result.Error = NormalizePowerShellError(errorTask.Result);
-                    if (result.ExitCode != 0)
-                    {
-                        string encodedError = ExtractEncodedError(result.Output);
-                        throw new InvalidOperationException(!string.IsNullOrWhiteSpace(encodedError)
-                            ? encodedError
-                            : (string.IsNullOrWhiteSpace(result.Error) ? result.Output : result.Error));
-                    }
-                    return result;
+                }
+                finally
+                {
+                    OperationTimingLog.Write("script " + operation, outcome, stopwatch.ElapsedMilliseconds);
                 }
             });
         }

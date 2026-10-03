@@ -25,6 +25,51 @@ $script:DreamSkinStartAppearanceRecoveryStates = @(
   'preserved-rendered'
 )
 
+$script:DreamSkinTimingStopwatch = $null
+$script:DreamSkinTimingRoot = ''
+$script:DreamSkinTimingSource = ''
+$script:DreamSkinTimingOperation = ''
+$script:DreamSkinTimingMaxBytes = 512KB
+
+# Stage timings shared with the manager in timing.log under the caller's state
+# root. Diagnostic only: a full disk or a locked log must never change the
+# outcome of the measured operation.
+function Start-DreamSkinTiming {
+  param(
+    [Parameter(Mandatory = $true)][string]$Source,
+    [Parameter(Mandatory = $true)][string]$Operation,
+    [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'CodexDreamSkin')
+  )
+  $script:DreamSkinTimingRoot = $StateRoot
+  $script:DreamSkinTimingSource = $Source
+  $script:DreamSkinTimingOperation = $Operation
+  $script:DreamSkinTimingStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  Write-DreamSkinTimingMark -Stage 'start'
+}
+
+function Write-DreamSkinTimingMark {
+  param([Parameter(Mandatory = $true)][string]$Stage)
+  try {
+    if ($null -eq $script:DreamSkinTimingStopwatch) { return }
+    $root = $script:DreamSkinTimingRoot
+    if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) { return }
+    $path = Join-Path $root 'timing.log'
+    $existing = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    if ($null -ne $existing -and $existing.Length -gt $script:DreamSkinTimingMaxBytes) {
+      Move-Item -LiteralPath $path -Destination ($path + '.1') -Force -ErrorAction SilentlyContinue
+    }
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    $line = [string]::Format($invariant, "{0} [{1}#{2}] {3} :: {4} (+{5} ms)`r`n",
+      (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss.fffzzz', $invariant),
+      $script:DreamSkinTimingSource, $PID, $script:DreamSkinTimingOperation, $Stage,
+      $script:DreamSkinTimingStopwatch.ElapsedMilliseconds)
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($line)
+    $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write,
+      ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+  } catch {}
+}
+
 function New-DreamSkinStartException {
   param(
     [Parameter(Mandatory = $true)][string]$Category,
