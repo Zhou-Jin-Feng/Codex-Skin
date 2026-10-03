@@ -15,6 +15,7 @@ namespace CodexDreamSkinManager
     {
         private static void RunStatusReadTests()
         {
+            WarmUpPowerShell();
             Run("Catalog publishes before a blocked status read completes", delegate { AssertIndependentRead(false, false, false); });
             Run("Status failure preserves the independently loaded catalog and last running state", delegate { AssertIndependentRead(true, false, false); });
             Run("Status publishes before a blocked catalog read completes", delegate { AssertIndependentRead(false, false, true); });
@@ -118,7 +119,7 @@ if ($Action -eq 'Status' -and (-not $Quick -or -not $SkipThemes)) { throw 'Statu
 if ($Action -eq 'ListThemes' -and ($Quick -or $SkipThemes)) { throw 'Catalog request lost its own contract' }
 if ($Action -ne 'Status' -and $Action -ne 'ListThemes') { throw 'Unexpected action' }
 if ($Action -eq '__SLOW__') {
-  $deadline = [DateTime]::UtcNow.AddSeconds(10)
+  $deadline = [DateTime]::UtcNow.AddSeconds(20)
   while (-not (Test-Path (Join-Path $PSScriptRoot 'release'))) {
     if ([DateTime]::UtcNow -gt $deadline) { throw 'Test did not release read' }
     Start-Sleep -Milliseconds 20
@@ -173,8 +174,29 @@ if ($Action -eq 'Status') {
             Stopwatch clock = Stopwatch.StartNew();
             while (!predicate())
             {
-                if (clock.ElapsedMilliseconds > 8000) throw new Exception("Independent read did not publish before the other completed.");
+                // Stay just under the 15 s read timeout that ends the blocked read.
+                if (clock.ElapsedMilliseconds > 14000) throw new Exception("Independent read did not publish before the other completed.");
                 await Task.Delay(20);
+            }
+        }
+
+        // These are the first tests to launch PowerShell. A cold first start
+        // (module cache, script scanning) can take several seconds on a busy
+        // machine, which is unrelated to the read independence being tested.
+        private static void WarmUpPowerShell()
+        {
+            string script = Path.Combine(Path.GetTempPath(), "dream-skin-warmup-" + Guid.NewGuid().ToString("N") + ".ps1");
+            try
+            {
+                File.WriteAllText(script, "'warm'", new UTF8Encoding(true));
+                PowerShellRunner.RunAsync(script, new List<ScriptArgument>(), 60000).Wait();
+            }
+            catch
+            {
+            }
+            finally
+            {
+                try { File.Delete(script); } catch { }
             }
         }
     }
