@@ -8,7 +8,8 @@ param(
   # 写进报告的备注，例如 idle / streaming。
   [string]$Label = '',
   [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'),
-  [string]$SkillRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'windows'),
+  # 默认为本仓库的 windows 目录；也可指向管理器安装目录下的 windows 文件夹。
+  [string]$SkillRoot = '',
   [string]$NodePath = '',
   [string]$OutFile = ''
 )
@@ -18,6 +19,8 @@ param(
 # 详见 docs/optimization-plan.md 第 0 阶段。
 
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 does not populate $PSScriptRoot while evaluating param defaults.
+if (-not $SkillRoot) { $SkillRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'windows' }
 
 $skinProfilePath = [System.IO.Path]::GetFullPath((Join-Path $StateRoot 'cdp-profile'))
 $statePath = Join-Path $StateRoot 'state.json'
@@ -307,7 +310,10 @@ function Get-DiagLogSummary {
       continue
     }
     $item = Get-Item -LiteralPath $path
-    $lines = @(Get-Content -LiteralPath $path -Tail 5000 -Encoding UTF8 -ErrorAction SilentlyContinue)
+    # Re-create plain strings: Get-Content attaches PSDrive/PSProvider note properties,
+    # which ConvertTo-Json in Windows PowerShell 5.1 expands into a huge object graph.
+    $lines = @(Get-Content -LiteralPath $path -Tail 5000 -Encoding UTF8 -ErrorAction SilentlyContinue |
+      ForEach-Object { "$_" })
     $counts = [ordered]@{}
     foreach ($key in $patterns.Keys) {
       $counts[$key] = @($lines | Where-Object { $_ -match $patterns[$key] }).Count
