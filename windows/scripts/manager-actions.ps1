@@ -870,8 +870,12 @@ function ConvertTo-ManagerBatchTheme {
 function Remove-ManagerDuplicateImageArchives {
   if (-not (Test-Path -LiteralPath $paths.Images -PathType Container)) { return }
   $seen = @{}
+  # Only files of identical size can be duplicates. Hashing every archive on
+  # each apply made the cost grow with the whole library (videos up to 128 MiB).
   $candidates = @(Get-ChildItem -LiteralPath $paths.Images -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match '^art-' } | Sort-Object LastWriteTimeUtc -Descending)
+    Where-Object { $_.Name -match '^art-' } | Group-Object -Property Length |
+    Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Group } |
+    Sort-Object LastWriteTimeUtc -Descending)
   foreach ($file in $candidates) {
     try {
       Assert-DreamSkinNoReparseComponents -Path $file.FullName

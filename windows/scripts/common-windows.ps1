@@ -744,7 +744,40 @@ function Get-DreamSkinValidatedNodeRuntime {
   return [pscustomobject]@{ Path = $runtimePath; Version = $version; Major = $major }
 }
 
+$script:DreamSkinNodeRuntimeCache = $null
+
 function Get-DreamSkinNodeRuntime {
+  param([int]$MinimumMajor = 22)
+
+  # One manager action resolves the runtime several times (metadata checks,
+  # video probes, live apply). Reuse the validated result within this process
+  # while the executable keeps the same path, size and timestamp; any change
+  # repeats the full Authenticode and identity validation below.
+  $cached = $script:DreamSkinNodeRuntimeCache
+  if ($null -ne $cached -and $cached.Runtime.Major -ge $MinimumMajor) {
+    try {
+      $current = Get-Item -LiteralPath $cached.Runtime.Path -ErrorAction Stop
+      if ($current.Length -eq $cached.Length -and $current.LastWriteTimeUtc -eq $cached.LastWriteTimeUtc) {
+        return $cached.Runtime
+      }
+    } catch {}
+    $script:DreamSkinNodeRuntimeCache = $null
+  }
+  $runtime = Resolve-DreamSkinNodeRuntime -MinimumMajor $MinimumMajor
+  try {
+    $item = Get-Item -LiteralPath $runtime.Path -ErrorAction Stop
+    $script:DreamSkinNodeRuntimeCache = [pscustomobject]@{
+      Runtime = $runtime
+      Length = $item.Length
+      LastWriteTimeUtc = $item.LastWriteTimeUtc
+    }
+  } catch {
+    $script:DreamSkinNodeRuntimeCache = $null
+  }
+  return $runtime
+}
+
+function Resolve-DreamSkinNodeRuntime {
   param([int]$MinimumMajor = 22)
 
   # The runtime that runs Safe CSS validation, theme-package validation, image
