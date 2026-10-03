@@ -5,6 +5,7 @@
 /.claude/
 /.agents/
 /.dependencies/
+/.serena/
 
 # Build and test output
 /build/
