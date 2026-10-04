@@ -186,6 +186,24 @@ html[data-dream-skin="active"] {
     backdrop-filter: none !important;
   }
 
+  /* Settings has no home or thread scene, so the full-height bg-surface
+     container inside main veils the whole page (Codex's opaque surface until
+     the renderer binds it, the panel glass afterwards). On this route it is
+     page chrome: keep it clear so the artwork shows through and the native
+     setting cards remain the only boxes. The first selector keys off Codex's
+     own settings navigation, so a container inserted while switching settings
+     pages is clear before the renderer's next pass and never flashes; the
+     second is the renderer-scope fallback should Codex rename the class. Only
+     the outermost container is cleared, so floating panels inside keep their
+     glass; other routes keep the panel glass (the thread haze is intended). */
+  html[data-dream-skin="active"]:has([data-settings-panel-slug]) [data-app-shell-focus-area="main"]
+    :is([class~="electron:bg-surface"], [class~="bg-surface"]):not(:is([class~="electron:bg-surface"], [class~="bg-surface"]) *),
+  html[data-dream-skin="active"][data-dream-scope="settings"] [data-ds-part="main"]
+    [data-ds-surface="panel"]:not([data-ds-surface="panel"] *) {
+    background: transparent !important;
+    backdrop-filter: none !important;
+  }
+
   html[data-dream-skin="active"] [data-ds-surface] {
     --app-shell-panel-background: transparent !important;
     --color-codex-terminal-background: transparent !important;
