@@ -574,6 +574,16 @@ export async function runRendererRuntimeTest(assetRoot) {
     /:not\(:has\(main:is\(\.main-surface, \[data-app-shell-main-surface\], \[class\*=\"_MainContentSurface_\"\]\)\)\)[\s\S]{0,120}\[data-ds-part="composer"\]/,
     "Core CSS must style the validated generic composer.",
   );
+  assert.match(
+    css,
+    /html\[data-dream-skin="active"\]:has\(\[data-settings-panel-slug\]\) \[data-app-shell-focus-area="main"\]\s+:is\(\[class~="electron:bg-surface"\], \[class~="bg-surface"\]\):not\(:is\(\[class~="electron:bg-surface"\], \[class~="bg-surface"\]\) \*\)/,
+    "Settings must clear its outermost native container as soon as Codex inserts it, and only while the settings navigation exists.",
+  );
+  assert.match(
+    css,
+    /html\[data-dream-skin="active"\]\[data-dream-scope="settings"\] \[data-ds-part="main"\]\s+\[data-ds-surface="panel"\]:not\(\[data-ds-surface="panel"\] \*\)/,
+    "Settings must keep a renderer-scope fallback that clears only its outermost main panel.",
+  );
   // Every home/project selector must stay behind the root skin gate.  A
   // marker-class-to-:has() conversion must never leave native layout rules
   // active after pause/restore.
@@ -591,6 +601,8 @@ export async function runRendererRuntimeTest(assetRoot) {
   assert.equal(home.document.adoptedStyleSheets.length, 1);
   assert.equal(state.scope.baseState, "home");
   assert.equal(state.scope.level, "L1");
+  assert.equal(home.attrs.get("data-dream-scope"), "home",
+    "The base scope is published on the root for route-specific surface rules.");
   assert.equal(home.rootStyle.values.get("--dream-skin-brand-subtitle"), '"CODEX DREAM SKIN"');
   assert.equal(home.rootStyle.values.get("--dream-skin-status"), '"DREAM SKIN ONLINE"');
   assert.equal(home.rootStyle.values.get("--ds-theme-surface-radius"), "12px");
@@ -1100,6 +1112,7 @@ export async function runRendererRuntimeTest(assetRoot) {
   assert.equal(settings.window.__CODEX_DREAM_SKIN_STATE__.scope.baseState, "settings");
   assert.equal(settings.window.__CODEX_DREAM_SKIN_STATE__.scope.level, "L0");
   assert.equal(settings.attrs.get("data-dream-skin"), "active");
+  assert.equal(settings.attrs.get("data-dream-scope"), "settings");
   assert.equal(settings.document.adoptedStyleSheets.length, 1);
 
   const currentSettings = makeFixture({ nativeAppearance: "light", settingsPanel: true });
@@ -1110,6 +1123,7 @@ export async function runRendererRuntimeTest(assetRoot) {
   assert.equal(currentSettingsScope.level, "L0");
   assert.equal(currentSettingsScope.missingL1.length, 0);
   assert.equal(currentSettings.attrs.get("data-dream-skin"), "active");
+  assert.equal(currentSettings.attrs.get("data-dream-scope"), "settings");
   assert.equal(currentSettings.document.adoptedStyleSheets.length, 1);
 
   const explicit = makeFixture({ nativeAppearance: "light" });

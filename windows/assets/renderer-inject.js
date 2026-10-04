@@ -51,6 +51,7 @@
     "data-dream-art-safe-area", "data-dream-art-task-mode", "data-dream-art-aspect",
     "data-dream-art-ready", "data-dream-art-framing", "data-dream-art-position-mode",
     "data-dream-media", "data-dream-video-hidden", "data-dream-video-status",
+    "data-dream-scope",
   ];
   const initialRoute = new URLSearchParams(String(location.search || ""))
     .get("initialRoute") || "";
@@ -1110,6 +1111,9 @@
     const state = window[STATE_KEY];
     if (state?.installToken === installToken) {
       state.scope = scope;
+      // Route-specific surface rules in the stylesheet key off the base state.
+      const root = document.documentElement;
+      if (root) setAttribute(root, "data-dream-scope", scope.baseState);
       syncVideoPlayback();
     }
     return scope;
