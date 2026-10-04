@@ -20,10 +20,24 @@ export function installVideoDecodeProbe(key) {
   let timer = null;
   let frameCallback = null;
   let finish = null;
+  // A hidden window (minimized or fully covered) still decodes, but never
+  // presents a frame, so requestVideoFrameCallback cannot fire there. While
+  // hidden, a decoded first frame is the strongest evidence available.
+  const hidden = () => document.visibilityState === "hidden";
+  const decodedFrames = () => Math.max(Number(video.webkitDecodedFrameCount) || 0,
+    Number(video.getVideoPlaybackQuality?.()?.totalVideoFrames) || 0);
+  const acceptHiddenFrame = () => {
+    if (finish && hidden() && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0 &&
+        decodedFrames() > 0) {
+      finish({ pass: true, reason: "decoded-frame-hidden", width: video.videoWidth, height: video.videoHeight });
+    }
+  };
   const cleanup = () => {
     if (timer) clearTimeout(timer);
     if (frameCallback !== null) video.cancelVideoFrameCallback?.(frameCallback);
     video.onerror = null;
+    video.onloadeddata = null;
+    video.oncanplay = null;
     video.pause();
     video.removeAttribute("src");
     video.load();
@@ -43,7 +57,11 @@ export function installVideoDecodeProbe(key) {
         resolve(result);
       };
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => finish({ pass: false, reason: "decode-timeout" }), 7000);
+      timer = setTimeout(() => {
+        // The window may have been hidden after the first frame decoded.
+        acceptHiddenFrame();
+        finish({ pass: false, reason: hidden() ? "hidden-timeout" : "decode-timeout" });
+      }, 7000);
       const file = input.files?.[0];
       if (!file || file.size < 1 || file.size > 128 * 1024 * 1024 ||
           !/\.mp4$/i.test(file.name) || file.type && file.type !== "video/mp4") {
@@ -55,13 +73,17 @@ export function installVideoDecodeProbe(key) {
         return;
       }
       video.onerror = () => finish({ pass: false, reason: "decode-error", mediaError: video.error?.code || 0 });
+      video.onloadeddata = acceptHiddenFrame;
+      video.oncanplay = acceptHiddenFrame;
       frameCallback = video.requestVideoFrameCallback((_time, frame) => {
         finish({ pass: frame.width > 0 && frame.height > 0 && frame.presentedFrames > 0,
           reason: "decoded-frame", width: frame.width, height: frame.height });
       });
       url = URL.createObjectURL(file);
       video.src = url;
-      video.play().catch(() => finish({ pass: false, reason: "playback-rejected" }));
+      // Chromium rejects play() for video-only media in a hidden page to save
+      // power; decoding continues, so only a visible rejection is a failure.
+      video.play().catch(() => { if (!hidden()) finish({ pass: false, reason: "playback-rejected" }); });
     }),
   };
   // Self-clean even if CDP disconnects before start is invoked.
@@ -81,6 +103,9 @@ export async function probeVideoDecode(session, snapshotPath) {
     if (result.exceptionDetails || !objectId) throw new Error("无法在 Codex 中建立视频解码校验。");
     await session.send("DOM.setFileInputFiles", { files: [snapshotPath], objectId });
     const decoded = await session.evaluate(`window[${literal}]?.start()`);
+    if (decoded?.reason === "hidden-timeout") {
+      throw new Error("当前 Codex 窗口在后台时未能解码此视频（hidden-timeout）。请把 Codex 窗口显示出来后重试；仍失败时，请使用 H.264 兼容副本，或检查 HEVC 解码支持。");
+    }
     if (decoded?.pass !== true) {
       throw new Error(`当前 Codex 未能解码此视频（${decoded?.reason || "renderer-changed"}）。请使用 H.264 兼容副本，或检查 HEVC 解码支持。`);
     }

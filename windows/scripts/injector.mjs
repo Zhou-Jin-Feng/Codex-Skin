@@ -1128,6 +1128,72 @@ async function applyToSession(session, payload) {
   return session.evaluate(payload);
 }
 
+// A decode check depends only on the browser build and the exact media bytes,
+// so a passed check is remembered per (Chromium build, SHA-256) pair. The cache
+// only saves a repeat check: any read or write problem falls back to probing.
+const VIDEO_DECODE_CACHE_LIMIT = 64;
+
+function videoDecodeCachePath() {
+  return process.env.CODEX_DREAM_SKIN_VIDEO_DECODE_CACHE ||
+    path.join(path.dirname(MEDIA_CACHE_PARENT), "video-decode-v1.json");
+}
+
+async function videoDecodeCacheKey(session, mediaFilePath) {
+  // Media snapshots are named by the SHA-256 of their bytes.
+  const digest = /^([0-9a-f]{64})\.mp4$/i.exec(path.basename(String(mediaFilePath ?? "")))?.[1];
+  if (!digest) return null;
+  let version;
+  try {
+    version = await session.send("Browser.getVersion");
+  } catch {
+    return null;
+  }
+  const product = typeof version?.product === "string" ? version.product : "";
+  if (!product) return null;
+  const revision = typeof version.revision === "string" ? version.revision : "";
+  const build = createHash("sha256").update(`${product}|${revision}`).digest("hex").slice(0, 16);
+  return `${build}:${digest.toLowerCase()}`;
+}
+
+async function readVideoDecodeCache() {
+  try {
+    const parsed = JSON.parse(await fs.readFile(videoDecodeCachePath(), "utf8"));
+    if (parsed?.version !== 1 || !Array.isArray(parsed.entries)) return [];
+    return parsed.entries.filter((entry) => typeof entry?.key === "string" && entry.key.length <= 128 &&
+      Number.isInteger(entry.width) && entry.width > 0 && Number.isInteger(entry.height) && entry.height > 0);
+  } catch {
+    return [];
+  }
+}
+
+async function rememberVideoDecode(key, result) {
+  if (!key || result?.pass !== true || !Number.isInteger(result.width) || result.width <= 0 ||
+      !Number.isInteger(result.height) || result.height <= 0) return;
+  const file = videoDecodeCachePath();
+  const entries = (await readVideoDecodeCache()).filter((entry) => entry.key !== key);
+  entries.unshift({ key, width: result.width, height: result.height, at: new Date().toISOString() });
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(temporary, JSON.stringify({ version: 1, entries: entries.slice(0, VIDEO_DECODE_CACHE_LIMIT) }),
+      { flag: "wx", mode: 0o600 });
+    await fs.rename(temporary, file);
+  } catch {
+    // Failing to remember a passed check must never fail the apply itself.
+  } finally {
+    await fs.unlink(temporary).catch(() => {});
+  }
+}
+
+export async function probeVideoDecodeOnce(session, mediaFilePath) {
+  const key = await videoDecodeCacheKey(session, mediaFilePath);
+  const cached = key ? (await readVideoDecodeCache()).find((entry) => entry.key === key) : null;
+  if (cached) return { pass: true, reason: "cached", width: cached.width, height: cached.height };
+  const result = await probeVideoDecode(session, mediaFilePath);
+  await rememberVideoDecode(key, result);
+  return result;
+}
+
 export async function probeVideoInCodex(snapshotPath, state) {
   let connected = [];
   let anchor = null;
@@ -1144,7 +1210,7 @@ export async function probeVideoInCodex(snapshotPath, state) {
   try {
     for (const { session, probe } of connected) {
       if (!probe?.codex || probe.excludedPetSurface) continue;
-      const result = await probeVideoDecode(session, snapshotPath);
+      const result = await probeVideoDecodeOnce(session, snapshotPath);
       if (anchor?.closed) throw new Error("Codex 连接已变化，请重试视频校验。");
       return result;
     }
@@ -1212,7 +1278,7 @@ export async function bindMediaFileToSession(session, loadedPayload, timeoutMs =
 }
 
 export async function applyLoadedToSession(session, loadedPayload) {
-  if (loadedPayload.theme?.artMetadata?.video) await probeVideoDecode(session, loadedPayload.mediaFilePath);
+  if (loadedPayload.theme?.artMetadata?.video) await probeVideoDecodeOnce(session, loadedPayload.mediaFilePath);
   await applyToSession(session, loadedPayload.payload);
   await bindMediaFileToSession(session, loadedPayload);
 }
