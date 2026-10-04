@@ -50,7 +50,20 @@ namespace CodexDreamSkinManager
                 application.SessionEnding += delegate { window.PrepareForSessionEnd(); };
                 string executablePath = Assembly.GetEntryAssembly().Location;
                 string settingsPath = ManagerSettings.DefaultPath;
-                using (TrayHost tray = new TrayHost(window, ManagerSettings.Load(settingsPath), settingsPath, executablePath))
+                TrayHost trayHost = null;
+                try
+                {
+                    trayHost = new TrayHost(window, ManagerSettings.Load(settingsPath), settingsPath, executablePath);
+                }
+                catch (Exception ex)
+                {
+                    // Without a tray the manager must stay usable as a plain
+                    // window that exits on close.
+                    window.MinimizeToTrayOnClose = false;
+                    startInTray = false;
+                    OperationTimingLog.Write("tray", "unavailable: " + ex.Message, 0);
+                }
+                using (TrayHost tray = trayHost)
                 using (InstanceActivationListener listener = InstanceActivationListener.Start(ActivationEventName,
                     delegate { window.Dispatcher.BeginInvoke(new Action(window.ShowFromTray)); }))
                 {

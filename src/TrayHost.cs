@@ -37,13 +37,15 @@ namespace CodexDreamSkinManager
                 e.Cancel = false;
                 window.RequestStatusRefresh();
             };
-            RebuildMenu();
+            // The icon must exist before the first menu build, which also
+            // refreshes the icon's tooltip.
             notifyIcon = new NotifyIcon();
             notifyIcon.Icon = trayIcon;
             notifyIcon.Text = AppName;
             notifyIcon.ContextMenuStrip = menu;
             notifyIcon.MouseClick += (sender, e) => { if (e.Button == MouseButtons.Left) window.ShowFromTray(); };
             notifyIcon.BalloonTipClicked += delegate { window.ShowFromTray(); };
+            RebuildMenu();
             notifyIcon.Visible = true;
             window.HiddenToTray += OnHiddenToTray;
             window.OperationFinished += OnOperationFinished;
@@ -219,7 +221,7 @@ namespace CodexDreamSkinManager
 
         private void ShowBalloon(string title, string text, ToolTipIcon kind)
         {
-            if (disposed) return;
+            if (disposed || notifyIcon == null) return;
             string body = string.IsNullOrWhiteSpace(text) ? AppName : text.Trim();
             if (body.Length > 250) body = body.Substring(0, 247) + "...";
             notifyIcon.ShowBalloonTip(5000, title, body, kind);
@@ -227,7 +229,7 @@ namespace CodexDreamSkinManager
 
         private void UpdateTooltip()
         {
-            if (disposed) return;
+            if (disposed || notifyIcon == null) return;
             string summary = window.TraySummary;
             string text = string.IsNullOrWhiteSpace(summary) ? AppName : AppName + "\n" + summary;
             // NotifyIcon.Text is limited to 63 characters on .NET Framework.
