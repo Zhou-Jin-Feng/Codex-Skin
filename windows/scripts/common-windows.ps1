@@ -1518,11 +1518,19 @@ function Stop-DreamSkinCodex {
   )
   $processes = Get-DreamSkinCodexProcessesExcept -Codex $Codex -PreserveProcessIds $PreserveProcessIds
   if ($processes.Count -eq 0) { return }
+  $closeRequested = $false
   foreach ($item in $processes) {
-    try { [void](Get-Process -Id $item.ProcessId -ErrorAction Stop).CloseMainWindow() } catch {}
+    try {
+      if ((Get-Process -Id $item.ProcessId -ErrorAction Stop).CloseMainWindow()) { $closeRequested = $true }
+    } catch {}
   }
 
-  $deadline = (Get-Date).AddSeconds(15)
+  # Without force authorization a manual close keeps its full 15 seconds. With
+  # restart consent, Codex keeps windowless processes (background instances,
+  # helpers) alive after its window closes, which used to cost the whole wait
+  # on every restart: give a visible window a short grace and force the rest.
+  $graceSeconds = if (-not $AllowForce) { 15 } elseif ($closeRequested) { 3 } else { 0 }
+  $deadline = (Get-Date).AddSeconds($graceSeconds)
   while ((Get-DreamSkinCodexProcessesExcept -Codex $Codex `
       -PreserveProcessIds $PreserveProcessIds).Count -gt 0 -and (Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds 250
@@ -1530,7 +1538,7 @@ function Stop-DreamSkinCodex {
   $remaining = Get-DreamSkinCodexProcessesExcept -Codex $Codex -PreserveProcessIds $PreserveProcessIds
   if ($remaining.Count -eq 0) { return }
   if (-not $AllowForce) {
-    throw 'Codex did not close within 15 seconds. Close it manually or explicitly authorize a forced restart.'
+    throw "Codex did not close within $graceSeconds seconds. Close it manually or explicitly authorize a forced restart."
   }
   foreach ($item in $remaining) {
     $current = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$item.ProcessId)" -ErrorAction SilentlyContinue
