@@ -10,7 +10,7 @@ try {
     Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
   if (-not $csc) { throw 'The .NET Framework C# compiler was not found.' }
   $references = @('System.dll','System.Core.dll','System.Web.Extensions.dll','System.Xml.dll',
-    'System.Drawing.dll','System.Windows.Forms.dll')
+    'System.Drawing.dll','System.Windows.Forms.dll','System.Management.dll')
   foreach ($name in @('System.Xaml','WindowsBase','PresentationCore','PresentationFramework',
       'System.IO.Compression','System.IO.Compression.FileSystem')) {
     $assembly = Get-ChildItem -LiteralPath 'C:\Windows\Microsoft.NET\assembly' -Filter "$name.dll" -Recurse |

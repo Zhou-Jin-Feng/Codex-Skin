@@ -338,7 +338,7 @@ $donationResource = '/resource:' + $donationImage + ',CodexDreamSkinManager.Dona
 & $csc /nologo /target:exe /platform:anycpu /out:$testExe /main:CodexDreamSkinManager.ManagerTests `
   $donationResource `
   /reference:System.dll /reference:System.Core.dll /reference:System.Web.Extensions.dll /reference:System.Xml.dll `
-  /reference:System.Drawing.dll /reference:System.Windows.Forms.dll `
+  /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Management.dll `
   $($compressionReferences | ForEach-Object { '/reference:' + $_ }) `
   $($wpfReferences | ForEach-Object { '/reference:' + $_ }) `
   $testSources
@@ -444,7 +444,7 @@ $iconResource = '/resource:' + $appIcon + ',CodexDreamSkinManager.AppIcon.ico'
   ('/win32icon:' + $appIcon) `
   /main:CodexDreamSkinManager.Program `
   /reference:System.dll /reference:System.Core.dll /reference:System.Web.Extensions.dll /reference:System.Xml.dll `
-  /reference:System.Drawing.dll /reference:System.Windows.Forms.dll `
+  /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Management.dll `
   $($compressionReferences | ForEach-Object { '/reference:' + $_ }) `
   $($wpfReferences | ForEach-Object { '/reference:' + $_ }) `
   $sources

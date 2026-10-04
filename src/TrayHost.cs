@@ -100,6 +100,14 @@ namespace CodexDreamSkinManager
                 };
                 autostart.Click += delegate { ToggleAutostart(); };
                 menu.Items.Add(autostart);
+
+                ToolStripMenuItem merge = new ToolStripMenuItem("新开的 Codex 并入皮肤窗口")
+                {
+                    Checked = settings.MergeExternalLaunches,
+                    ToolTipText = "点通知、从开始菜单或链接打开的 Codex 会并入已打开的皮肤窗口，不再另开没有皮肤的窗口"
+                };
+                merge.Click += delegate { ToggleMergeExternalLaunches(); };
+                menu.Items.Add(merge);
                 menu.Items.Add(new ToolStripSeparator());
 
                 ToolStripMenuItem exit = new ToolStripMenuItem("退出");
@@ -177,6 +185,15 @@ namespace CodexDreamSkinManager
             ShowBalloon(AppName, enable
                 ? "已开启开机自启：登录 Windows 后管理器会直接进入托盘。"
                 : "已关闭开机自启。", ToolTipIcon.Info);
+        }
+
+        private void ToggleMergeExternalLaunches()
+        {
+            settings.MergeExternalLaunches = !settings.MergeExternalLaunches;
+            settings.Save(settingsPath);
+            ShowBalloon(AppName, settings.MergeExternalLaunches
+                ? "已开启：新开的 Codex 会并入已打开的皮肤窗口。"
+                : "已关闭：新开的 Codex 不再并入皮肤窗口。", ToolTipIcon.Info);
         }
 
         // The older PowerShell tray created its own Startup shortcut; keeping both
