@@ -900,6 +900,56 @@ function Get-DreamSkinCodexInstall {
   return $installs[0]
 }
 
+# The skinned Codex must run on its own profile (CDP ignores the default
+# user-data-dir), which gave it a fresh Statsig device id and with it a
+# different experiment group than the user's normal Codex: another UI variant
+# and language, which the skin and its verification were not written for.
+# Before a launch (Codex is closed), adopt the normal profile's device id.
+# Only that id is copied; sign-in and conversation data are never touched.
+function Sync-DreamSkinProfileStatsigIdentity {
+  param(
+    [Parameter(Mandatory = $true)][object]$Codex,
+    [Parameter(Mandatory = $true)][string]$ProfilePath
+  )
+  try {
+    $family = "$($Codex.PackageFamilyName)"
+    if ($family -cnotmatch '^[A-Za-z0-9._-]{1,128}$') { return 'skipped (package family unknown)' }
+    $roaming = Join-Path $env:LOCALAPPDATA "Packages\$family\LocalCache\Roaming"
+    if (-not (Test-Path -LiteralPath $roaming -PathType Container)) { return 'skipped (no packaged profile root)' }
+    if (-not (Test-Path -LiteralPath $ProfilePath -PathType Container)) { return 'skipped (no skin profile directory)' }
+    $skinState = Join-Path $ProfilePath 'statsig-state.json'
+    # The normal profile is the packaged one most recently used by Codex.
+    $source = @(Get-ChildItem -LiteralPath $roaming -Recurse -Depth 4 -Filter 'statsig-state.json' -File -ErrorAction SilentlyContinue |
+      Where-Object {
+        -not (Test-DreamSkinPathEqual -Left $_.FullName -Right $skinState) -and
+        (Test-Path -LiteralPath (Join-Path $_.DirectoryName 'Local State') -PathType Leaf)
+      } |
+      Sort-Object -Property @{ Expression = { (Get-Item -LiteralPath (Join-Path $_.DirectoryName 'Local State')).LastWriteTimeUtc } } -Descending |
+      Select-Object -First 1)
+    if ($source.Count -eq 0) { return 'skipped (normal profile not found)' }
+    $stableId = "$((Get-Content -LiteralPath $source[0].FullName -Raw -Encoding UTF8 | ConvertFrom-Json).'statsig-stable-id')"
+    if ($stableId -cnotmatch '^[A-Za-z0-9-]{8,64}$') { return 'skipped (normal profile has no device id)' }
+    if (Test-Path -LiteralPath $skinState -PathType Leaf) {
+      $current = "$((Get-Content -LiteralPath $skinState -Raw -Encoding UTF8 | ConvertFrom-Json).'statsig-stable-id')"
+      if ($current -ceq $stableId) { return 'already shared' }
+    }
+    $json = '{"statsig-stable-id":"' + $stableId + '"}'
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    # Keep the profile's original id once, so the change can be reverted.
+    $original = $skinState + '.before-dreamskin-sync'
+    if ((Test-Path -LiteralPath $skinState -PathType Leaf) -and -not (Test-Path -LiteralPath $original)) {
+      Copy-Item -LiteralPath $skinState -Destination $original
+    }
+    foreach ($target in @($skinState, ($skinState + '.bak'))) {
+      Assert-DreamSkinNoReparseComponents -Path $target
+      [System.IO.File]::WriteAllText($target, $json, $encoding)
+    }
+    return 'adopted from the normal profile'
+  } catch {
+    return "skipped ($($_.Exception.Message))"
+  }
+}
+
 function Initialize-DreamSkinPackageLauncher {
   if ('CodexDreamSkin.PackageLauncher' -as [type]) { return }
   Add-Type -TypeDefinition @'
