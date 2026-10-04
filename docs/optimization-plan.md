@@ -2,7 +2,7 @@
 
 编写日期：2026-10-04，同日按用户反馈调整优先级。基线版本：`2.0.1`（`68cbd51`），目标版本：`2.1.0`。范围以 Windows 为主，macOS 在第 6 阶段跟进。
 
-根因分析来自静态阅读代码，配合第 0 阶段的现场取证。标注“待计时确认”的条目，要等 C0.2 的分阶段计时数据。
+根因分析来自静态阅读代码，配合第 0 阶段的现场取证；C0.2 的分阶段计时数据已经补上，原先“待计时确认”的条目已按实测更新。
 
 ## 目标
 
@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | C0.1 | 取证脚本 | 已提交（`a6c2413`） |
 | C0.2 | 分阶段计时日志 | 已提交，真机已产出计时数据 |
-| C1.1–C1.3 | 托盘常驻、托盘快速切换与暂停、开机自启 | 已提交（三项合为一个提交），真机体验中 |
+| C1.1–C1.3 | 托盘常驻、托盘快速切换与暂停、开机自启 | 已提交（三项合为一个提交），托盘常驻和快速切换已在日常使用；开机自启未专门验证 |
 | C2.1 | 连接正常时跳过应用前的完整状态查询 | 已提交，真机确认热切换 3 秒内生效 |
 | C2.2 | Node 运行时校验缓存、存档去重预筛 | 已提交 |
 | C2.5 | 打开管理器时先显示缓存的主题列表和已验证的状态 | 已提交，现有测试通过，待真机体验 |
@@ -26,9 +26,11 @@
 | C4.6 | 启动脚本内只解析一次已注册的 Codex 安装 | 已提交，同上 |
 | C4.7 | 脚本已完成但 PowerShell 进程不退出时，不再等到 5 分钟超时 | 已提交，真机确认进程确实滞留（`host lingered`），宽限缩短为 1.5 秒 |
 | C2.3、C2.4 | 跳过重复媒体校验、常驻 PowerShell | 视后续计时再定 |
-| C4.2–C4.4 | 校验前激活窗口、视频解码缓存、条件等待 | 未开始 |
+| C4.2、C4.4 | 校验前激活窗口、条件等待 | 未开始 |
+| C4.3 | 记住通过的视频解码校验（同一 Chromium 构建、同一文件只校验一次） | 已随 C4.8 提交（`c1b82b2`），真机确认第二次校验直接命中；未连接时为校验多重启一次的问题仍在 |
+| C4.8 | Codex 窗口在后台时，视频校验改以解出首帧为准 | 已提交（`c1b82b2`），真机确认后台窗口下 0.7 秒通过（原来等满 7 秒后报 `decode-timeout`） |
 | C3.3 | 点通知、从开始菜单打开的 Codex 并入皮肤窗口 | 已提交，真机确认点通知不再另开无皮肤窗口 |
-| C3.6 | 皮肤 profile 共用默认 profile 的 Statsig 设备标识 | 已提交，待下次重启 Codex 时真机确认界面与语言 |
+| C3.6 | 皮肤 profile 共用默认 profile 的 Statsig 设备标识 | 已提交；10 月 4 日 23:26 通过管理器重启 Codex 时，日志显示两边设备标识已一致，界面与语言待用户确认 |
 | C5.3 | 清除 26.930 对话页输入框后的底板和渐变（大黑框） | 已提交，真机确认效果 |
 | 第 3 阶段其余 | 连接保持健康（C3.1、C3.2、C3.4、C3.5） | 用户要求暂缓 |
 
@@ -38,11 +40,12 @@ C2.1 的快速预检与脚本侧一样核对运行时指纹：正在运行的注
 
 ## 执行约定
 
-- 遵守 `AGENTS.md`：各阶段只写实现，不新增测试、不跑测试、不做可视化验证；测试统一放在第 7 阶段，得到明确指示后执行。允许做不运行程序的静态检查（脚本语法解析、C# 编译到临时目录）。
-- 每个提交点是一个可独立回退的最小单元，提交信息沿用仓库的 Conventional Commits 风格。
+- 每个改动完成后，先跑与风险相称的测试、检查或构建再算完成；没跑过的明确写“未验证”。第 7 阶段只负责补齐早期提交点缺少的测试和真机验收。
+- 跑完整测试（`build.ps1`，含 `-TestsOnly`）前先确认管理器空闲：测试会和正在运行的管理器抢同一把操作锁，详见仓库根目录的 `CLAUDE.md`（原 `AGENTS.md` 已改名并重写，原作者的“不跑测试”规则已删除）。
+- 每个提交点是一个可独立回退的最小单元。提交信息格式为 `<英文类型>: <中文描述>`；已完成提交点的标题保留规划时的英文写法（实际提交以 git 记录为准，部分提交点合并成了一个提交），未完成提交点的标题已按新格式改写。
 - 修改 `runtime/` 后运行 `node tools/sync-runtime-assets.mjs`，同步产物与源码放在同一个提交里。
 - 不修改 WindowsApps、官方 Codex profile 或官方二进制文件；不新增管理员权限需求。
-- 提交、推送、发布都要等用户明确同意；用户已同意每完成一个提交点就直接提交（推送和发布仍需另行确认）。
+- 到了提交节点，由 Claude 给出提交建议和写好的提交信息，用户同意后再提交；推送、开 PR、合并 PR、打标签、发布 release 都要用户另行明确授权。
 - 本机构建：系统 PATH 里的 Node 24 旁边缺少 `LICENSE`，构建改用保存在 `build\node-runtime\` 的 Node 22（原取自已删除的 `D:\CodexDreamSkinManager`，签名有效）：
 
   ```powershell
@@ -63,6 +66,8 @@ C2.1 的快速预检与脚本侧一样核对运行时指纹：正在运行的注
 
 ## 现状与根因
 
+本节记录基线 `68cbd51` 的状态，行号也是基线的位置，之后的提交会让行号漂移；已解决的条目在末尾标注了对应的提交点。
+
 ### C. 应用皮肤慢（本轮首要问题）
 
 点“应用皮肤”有两条路线：
@@ -71,21 +76,21 @@ C2.1 的快速预检与脚本侧一样核对运行时指纹：正在运行的注
 
 | 编号 | 开销 | 位置 |
 | --- | --- | --- |
-| C1 | 每次应用前先跑一次完整的状态查询（新起 PowerShell，约 1.5 秒） | `src/MainWindow.cs:1203` |
-| C2 | `Get-DreamSkinNodeRuntime` 每次调用都做 Authenticode 签名校验和两次 node 探测，没有缓存；一次应用里会被调用多次 | `windows/scripts/common-windows.ps1:702` |
-| C3 | 每次应用都给全部存档图片计算 SHA256，只为去重 | `windows/scripts/manager-actions.ps1:870` |
-| C4 | 内置主题和“我的”主题在导入时已经校验过，应用时又对复制出的文件重复做元数据校验（node 子进程），视频还要再做一次解码校验 | `windows/scripts/theme-windows.ps1:652` |
+| C1 | 每次应用前先跑一次完整的状态查询（新起 PowerShell，约 1.5 秒）（已由 C2.1 解决） | `src/MainWindow.cs:1203` |
+| C2 | `Get-DreamSkinNodeRuntime` 每次调用都做 Authenticode 签名校验和两次 node 探测，没有缓存；一次应用里会被调用多次（已由 C2.2 解决） | `windows/scripts/common-windows.ps1:702` |
+| C3 | 每次应用都给全部存档图片计算 SHA256，只为去重（已由 C2.2 的预筛解决） | `windows/scripts/manager-actions.ps1:870` |
+| C4 | 内置主题和“我的”主题在导入时已经校验过，应用时又对复制出的文件重复做元数据校验（node 子进程），视频还要再做一次解码校验（视频解码校验已由 C4.3 记住结果；元数据重复校验未改，见 C2.3） | `windows/scripts/theme-windows.ps1:652` |
 
 **重启路线**（连接不正常）：查状态 → 检查能否启动 → 弹窗确认 → 关闭 Codex → 带调试端口重新打开（最多等 45 秒）→ 启动注入器 → 校验皮肤（最多重试 90 秒）。外层超时 5 分钟。
 
 | 编号 | 问题 | 位置 |
 | --- | --- | --- |
-| C5 | 校验要求 Codex 窗口真的显示在屏幕上；被管理器窗口挡住或最小化时会一直重试到 90 秒超时，再回滚重来。这很可能是 3–5 分钟的主因（待计时确认） | `start-dream-skin.ps1:537-583` |
-| C6 | 视频主题在未连接时要“先连接、校验视频、再重启”，重启两次 | `src/MainWindow.cs:1217-1227` |
-| C7 | 查状态、检查启动、启动各是一个 PowerShell 进程，每个都要重新加载几千行脚本 | `src/DreamSkinService.cs:509-527` |
-| C8 | 启动流程里有固定等待和 200ms 粒度的轮询 | `start-dream-skin.ps1:288`、`502`、`582` |
+| C5 | 校验要求 Codex 窗口真的显示在屏幕上；被管理器窗口挡住或最小化时会一直重试到 90 秒超时，再回滚重来。计时确认这不是 3–5 分钟的主因，主因是脚本结束后 PowerShell 进程滞留（C4.7，已解决）；窗口不可见时校验空等的问题仍在，见 C4.2 | `start-dream-skin.ps1:537-583` |
+| C6 | 视频主题在未连接时要“先连接、校验视频、再重启”，重启两次（仍存在，见 C4.3 的未覆盖说明） | `src/MainWindow.cs:1217-1227` |
+| C7 | 查状态、检查启动、启动各是一个 PowerShell 进程，每个都要重新加载几千行脚本（确定要重启时跳过单独检查已由 C4.1 实现，待真机复测；常驻 PowerShell 见 C2.4，未做） | `src/DreamSkinService.cs:509-527` |
+| C8 | 启动流程里有固定等待和 200ms 粒度的轮询（未做，见 C4.4） | `start-dream-skin.ps1:288`、`502`、`582` |
 
-**为什么经常走重启路线**：只要 Codex 不是由管理器打开的，连接就不正常。例如从任务栏或开始菜单打开 Codex、点通知开出的窗口（A7）、Codex 自更新重启（A5）、注入器进程退出、管理器更新后运行时指纹变化。
+**为什么经常走重启路线**：只要 Codex 不是由管理器打开的，连接就不正常。例如从任务栏或开始菜单打开 Codex、点通知开出的窗口（A7）、Codex 自更新重启（A5）、注入器进程退出、管理器更新后运行时指纹变化。其中前两种在皮肤实例运行时已由 C3.3 并入皮肤窗口；皮肤实例不在时仍会打开无皮肤的 Codex（C3.4，暂缓）。
 
 ### A. 皮肤容易掉
 
@@ -94,10 +99,10 @@ C2.1 的快速预检与脚本侧一样核对运行时指纹：正在运行的注
 | A1 | 目标页注入成功后进入 `sessions`，watcher 不再核验皮肤是否仍在；之后任何一次丢失都不会自动修复 | `windows/scripts/injector.mjs:2158` |
 | A2 | 页面重载后的补注入失败只记日志，不重试，也不把会话移出 `sessions` | `injector.mjs:1964-1978` |
 | A3 | 提前注入脚本每 250ms 轮询一次、10 秒后放弃；Codex 冷启动慢时错过时机，随后的加载回退又只做“绑定媒体文件”，于是落入 A2 | `injector.mjs:1265-1266`、`1971` |
-| A4 | 视频主题完全不做提前注入，每次重载都要等 load 事件、再等 250ms、再做一次解码校验 | `injector.mjs:1221`、`1215` |
+| A4 | 视频主题完全不做提前注入，每次重载都要等 load 事件、再等 250ms、再做一次解码校验（解码校验已由 C4.3 记住结果，提前注入未改） | `injector.mjs:1221`、`1215` |
 | A5 | CDP 浏览器身份变化（Codex 自更新重启、`app.relaunch()`）时 watcher 以退出码 3 退出，没有任何组件把它拉起来 | `injector.mjs:2016-2020`、`2048-2051` |
 | A6 | 页面内只有 30 秒一次的兜底检查会补回被覆盖的 `adoptedStyleSheets`；部件监听只挂在安装时的那个 `body` 上 | `runtime/renderer-inject.js:1314`、`1299-1313` |
-| A7 | 点击右下角“Codex 已完成”通知，会新开一个没有皮肤的 Codex 窗口（已取证确认，见下节） | `start-dream-skin.ps1:84-90`、`259` |
+| A7 | 点击右下角“Codex 已完成”通知，会新开一个没有皮肤的 Codex 窗口（已取证确认，见下节；已由 C3.3 解决，真机确认） | `start-dream-skin.ps1:84-90`、`259` |
 
 ### A7 根因：通知激活绕开了皮肤 profile
 
@@ -108,7 +113,7 @@ ChatGPT.exe --remote-debugging-address=127.0.0.1 --remote-debugging-port=<port>
             --user-data-dir=%LOCALAPPDATA%\CodexDreamSkin\cdp-profile
 ```
 
-Electron 的单实例锁按 user-data-dir 区分。点击通知时，Windows 推送通知服务（`WpnUserService`）直接启动 `ChatGPT.exe type=click&tag=<id>`，不带 `--user-data-dir`：新进程找不到皮肤实例持有的锁，于是用默认 profile 自己成为主实例。它没有调试端口，注入器连不上，所以窗口没有皮肤。从开始菜单或任务栏打开 Codex 也是同一个原因。
+Electron 的单实例锁按 user-data-dir 区分。点击通知时，Windows 推送通知服务（`WpnUserService`）直接启动 `ChatGPT.exe type=click&tag=<id>`，不带 `--user-data-dir`：新进程找不到皮肤实例持有的锁，于是用默认 profile 自己成为主实例。它没有调试端口，注入器连不上，所以窗口没有皮肤。从开始菜单或任务栏打开 Codex 也是同一个原因。修复见 C3.3。
 
 ### B. 其他性能项
 
@@ -116,20 +121,20 @@ Electron 的单实例锁按 user-data-dir 区分。点击通知时，Windows 推
 | --- | --- | --- |
 | B1 | Codex 输出回答时，部件监听最多约每 80ms 触发一次完整刷新（实测单次约 11ms）。用户反馈无明显影响，降为可选 | `renderer-inject.js:1214`、`986-1065` |
 | B2 | watcher 每 30 秒整读一次背景文件并计算 SHA256（视频最大 128MB） | `injector.mjs:77`、`839`、`2068` |
-| B3 | 视频主题每次页面重载都重做一遍解码校验 | `injector.mjs:1215` |
+| B3 | 视频主题每次页面重载都重做一遍解码校验（已由 C4.3 解决） | `injector.mjs:1215` |
 
 ## 阶段总览
 
 | 阶段 | 目标 | 解决 | 提交点 |
 | --- | --- | --- | --- |
-| 0 | 取证与计时 | 为 C 类问题提供数据 | C0.1（已完成）、C0.2 |
+| 0 | 取证与计时 | 为 C 类问题提供数据 | C0.1、C0.2（均已完成） |
 | 1 | 托盘常驻 | 目标 3 | C1.1–C1.3 |
-| 2 | 热切换提速 | C1–C4 | C2.1–C2.4 |
-| 3 | 连接保持健康 | A1–A5、A7，减少走重启路线的次数 | C3.1–C3.5 |
-| 4 | 重启路线提速 | C5–C8 | C4.1–C4.4 |
-| 5 | 页面内渲染（可选） | A6、B1 | C5.1–C5.2 |
+| 2 | 热切换提速 | C1–C4 | C2.1–C2.5 |
+| 3 | 连接保持健康 | A1–A5、A7，减少走重启路线的次数 | C3.1–C3.6 |
+| 4 | 重启路线提速 | C5–C8、B3 | C4.1–C4.8 |
+| 5 | 页面内渲染（可选） | A6、B1，以及新版对话页的大黑框 | C5.1–C5.3 |
 | 6 | macOS 对齐 | 共享部分 | C6.1 |
-| 7 | 测试、验收与发版（需明确指示后执行） | — | C7.1–C7.3 |
+| 7 | 补测试、验收与发版 | — | C7.1–C7.3 |
 
 第 1、2 阶段先做；第 3 阶段的守护功能依赖第 1 阶段的托盘常驻。
 
@@ -207,12 +212,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\diag-runtime.ps1 -Mo
 - `Get-DreamSkinNodeRuntime` 在同一个脚本进程内缓存校验结果，以文件路径、大小、修改时间为键，任一变化就重新校验。
 - 存档去重先按文件大小分组，只给大小相同的文件计算哈希。
 
-### C2.3 `perf(windows): skip redundant media validation for validated themes`（视 C0.2 计时结果）
+### C2.3 `perf: 已校验过的主题应用时跳过重复的媒体校验`（视计时结果再定）
 
 - 应用内置主题或“我的”主题时，如果源文件的哈希命中“已校验媒体”缓存，就跳过复制后的元数据重复校验和视频解码重复校验。
 - 缓存键包含文件哈希和运行时指纹；运行时更新后缓存自动失效。
 
-### C2.4 `perf(manager): reuse a resident PowerShell worker`（视 C0.2 计时结果）
+### C2.4 `perf: 管理器复用常驻的 PowerShell 进程`（视计时结果再定）
 
 - 常驻一个 `powershell.exe` 子进程，预先加载公共脚本，通过 stdin/stdout 按行收发 JSON 请求；工作进程随管理器退出而结束。
 - 先只迁移只读操作；工作进程异常时自动退回“每次新起进程”。
@@ -230,14 +235,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\diag-runtime.ps1 -Mo
 
 托盘常驻后，管理器负责在后台看住皮肤连接，让换肤尽量都走热路线。
 
-### C3.1 `fix(injector): self-heal live sessions`
+### C3.1 `fix: 注入器自动修复已连接页面上丢失的皮肤`
 
 - 每 5 秒对已连接页面做一次轻量检查（版本号、样式挂载、图片或视频就绪、根节点标记），不符就重新注入；连续 3 次失败则断开该页面，下一轮自动重连。
 - 页面重载后的补注入失败时，同样把会话标为不健康。
 - 提前注入改为一直等到识别出 Codex 界面为止（保留 120 秒防泄漏上限）；加载回退在页面里没有皮肤时走完整注入。
 - 去掉每 30 秒一次的媒体全量哈希，只在文件大小、修改时间或文件标识变化时重新校验。
 
-### C3.2 `feat(manager): restart the injector without restarting Codex`
+### C3.2 `feat: 不重启 Codex 也能重新拉起注入器`
 
 - 管理器每 10 秒做一次 C2.1 的快速预检。发现注入器退出、但 Codex 调试端口仍在且身份一致时，在后台以“只连接”方式重新启动注入器，不重启 Codex，也不弹窗。
 - 运行时指纹变化（管理器更新后）也走这条路，替换掉旧的注入器。
@@ -264,13 +269,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\diag-runtime.ps1 -Mo
 - 取证：只注册了一个 Codex 版本（26.930）；两份数据目录的浏览器版本和浏览器语言设置相同，但 Statsig 设备标识不同。默认 profile 位于 `%LOCALAPPDATA%\Packages\OpenAI.Codex_<id>\LocalCache\Roaming\Codex\web\Codex`，标识自 9 月 3 日沿用至今；皮肤 profile 于 10 月 3 日新建，生成了新标识，被分进另一组灰度实验。
 - 修复：每次以皮肤 profile 拉起 Codex 前（此时 Codex 已关闭），把默认 profile 的 `statsig-stable-id` 写入皮肤 profile 的 `statsig-state.json` 及其 `.bak`；首次覆盖前保留原文件为 `statsig-state.json.before-dreamskin-sync`。只复制这一个标识，不涉及登录与对话数据；任何失败都跳过并记计时点。
 
-### C3.4 `feat(manager): optionally take over externally launched Codex`
+### C3.4 `feat: 可选接管外部打开的 Codex`
 
 - 托盘菜单增加开关“外部打开的 Codex 自动接管”，默认关闭。
 - 开启后，皮肤实例不存在时外部打开的 Codex 会被关闭，改走标准启动流程，用皮肤 profile 重新打开。
 - 关闭时只在管理器状态里提示“当前 Codex 未带皮肤”，并提供“重新应用皮肤”。
 
-### C3.5 `fix(manager): recover after Codex restarts itself`
+### C3.5 `fix: Codex 自行重启后自动恢复皮肤`
 
 - Codex 自更新或 `app.relaunch()` 会沿用原命令行重启，新进程仍带皮肤 profile 和调试端口，只是浏览器身份变了，注入器因此退出（A5）。
 - 管理器确认新端点的监听进程属于已验证包、且命令行带皮肤 profile 后，以“只连接”方式换上新注入器。身份核验仍在 PowerShell 侧完成，注入器不自行采纳新身份。
@@ -327,24 +332,42 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\diag-runtime.ps1 -Mo
 | 首次校验通过 | 13.6 秒 | 等 Codex 界面加载 |
 | 进程滞留后收尾 | 5 秒 | 已缩短为 1.5 秒 |
 
-### C4.2 `fix(windows): bring Codex to front before renderer verification`
+### C4.2 `fix: 校验皮肤显示前先把 Codex 窗口切到前台`
 
 - 启动注入器后、第一次校验前，先把 Codex 窗口切到前台，并把管理器窗口移到后面或最小化，避免校验因窗口不可见而空等。
 - 校验时窗口仍不可见，就按“皮肤已推送、等窗口可见时再确认”处理，不再回滚重启。
 
-### C4.3 `perf(windows): cache video decode capability`
+### C4.3 视频解码校验缓存（已随 C4.8 提交，`c1b82b2`）
 
 - 按 Codex 版本和视频编码缓存解码校验结果，避免视频主题为了校验而多重启一次。
+- 已实现缓存本身（随 C4.8 一起）：Windows 注入器把通过的校验记在 `%LOCALAPPDATA%\CodexDreamSkinManager\video-decode-v1.json`，键为 Chromium 构建（CDP `Browser.getVersion` 的 `product` 和 `revision`）加媒体文件的 SHA-256；只记通过的结果，最多 64 条。应用前的校验和实时应用都会先查缓存，缓存读写出错时退回实际校验。
+- 未覆盖：Codex 未连接时仍要先连接才能校验（`src/MainWindow.cs` 的 `needsStart && video` 分支），“多重启一次”这部分没有变。
 
-### C4.4 `perf(windows): replace fixed sleeps with condition waits`
+### C4.4 `perf: 把固定等待改为条件等待`
 
 - 把固定等待改成条件等待（注入器写出就绪标记、端点可连接）；CDP 轮询从 200ms 改为先快后慢。
+
+### C4.8 `fix: Codex 窗口在后台时视频校验改以解出首帧为准并缓存校验结果`（`c1b82b2`）
+
+- 现象（2026-10-04 20:08）：应用内置视频主题“银璃幻梦”失败，提示“当前 Codex 未能解码此视频（decode-timeout）。请使用 H.264 兼容副本……”。
+- 取证：
+  - 两个内置视频都是 H.264（`avc1`）；银璃幻梦为 3840×2160、60 帧、5.1 秒，编码不是原因。
+  - 应用视频主题前，`runtime/video-decode-probe.mjs` 在 Codex 页面里放一个 1×1 透明视频，等 `requestVideoFrameCallback` 报告画出一帧，7 秒内没有就报 `decode-timeout`。
+  - 报错后查到 Codex 主窗口为隐藏状态（`document.visibilityState === "hidden"`）；切回 Codex 后同一校验 0.1–0.2 秒通过。
+  - 隐藏页面实验（内置浏览器后台标签页，同一视频）：元数据 81 毫秒读出；`play()` 被拒（“video-only background media was paused to save power”）；115 毫秒触发 `loadeddata`，解码帧计数为 1；`requestVideoFrameCallback` 直到页面变为可见才触发。即隐藏时照常解码，只是不画出来。
+- 修复：
+  - 窗口可见时不变，仍等画出一帧。
+  - 窗口隐藏时，`readyState >= 2`、有宽高且解码帧计数大于 0 即通过（`decoded-frame-hidden`）；隐藏时 `play()` 被拒不算失败。
+  - 隐藏时 7 秒仍没解出画面，报 `hidden-timeout`，提示先把 Codex 窗口显示出来再重试。
+- 真机：Codex 主窗口隐藏时运行 `validate-video-file.mjs`，银璃幻梦 0.7 秒通过（`decoded-frame-hidden`），第二次命中 C4.3 的缓存。
+- 用户实测（23:25）：通过管理器应用银璃幻梦成功，校验结果写入缓存；这是脚本更新后的第一次应用，按设计走了重启路线。“Codex 最小化时从托盘热切换视频主题”尚未在界面上实测。
+- 共享脚本经 `sync-runtime-assets` 同步到 macOS，macOS 的应用前校验同样受益；macOS 注入器未加缓存。
 
 ---
 
 ## 第 5 阶段：页面内渲染（`runtime/renderer-inject.js`，改完同步）
 
-### C5.1 `fix(renderer): repair adopted stylesheet and re-observe replaced body`
+### C5.1 `fix: 样式表被覆盖时补回，body 被替换后重新监听`
 
 - 每次部件刷新时顺带检查样式表是否还挂着，被覆盖就补回；`body` 被替换时重新挂监听。
 
@@ -361,7 +384,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\diag-runtime.ps1 -Mo
   - 消息内折叠内容的渐变不受影响。
 - 未改渲染脚本的面板识别逻辑：提示框等元素同样是 `pointer-events-none`，按“不可点击”统一排除会误伤。
 
-### C5.2 `perf(renderer): throttle part refresh during message streaming`（可选）
+### C5.2 `perf: 输出回答时降低部件刷新频率`（可选）
 
 - 跳过只发生在消息内容区内部的 DOM 变化；调度改为“尾部防抖 200ms + 最长等待 800ms”。
 
@@ -369,16 +392,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\diag-runtime.ps1 -Mo
 
 ## 第 6 阶段：macOS 对齐
 
-### C6.1 `fix(macos): port watcher self-healing`
+### C6.1 `fix: macOS 注入器移植会话自愈`
 
 - 渲染脚本经 `sync-runtime-assets` 共享，第 5 阶段的改动自动带过去。
 - `macos/scripts/injector.mjs` 是独立实现，需要移植 C3.1。托盘、守护和热切换提速只涉及 Windows 管理器，不移植。
 
 ---
 
-## 第 7 阶段：测试、验收与发版（需明确指示后执行）
+## 第 7 阶段：补测试、验收与发版
 
-### C7.1 `test: cover tray, fast apply and self-healing`
+各提交点自己的测试随改动一起跑；本阶段补齐早期提交点缺少的测试，做真机验收，再发版。发版（打标签、发布 release）需用户明确授权。
+
+### C7.1 `test: 补齐托盘、快速应用和会话自愈的测试`
 
 - `tests/ManagerTests.cs`：关闭时隐藏与真正退出、`--tray` 启动、快速预检的各个失败分支、设置文件读写、开机自启开关。
 - `windows/tests/injector-watch-lifecycle.test.mjs`、`injector-bootstrap.test.mjs`：会话自愈、提前注入超过 10 秒仍能完成。
@@ -394,7 +419,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\diag-runtime.ps1 -Mo
 6. 结束注入器进程，10 秒内自动恢复，Codex 不重启。
 7. Codex 自更新重启后皮肤自动恢复。
 
-### C7.3 `chore: release v2.1.0`
+### C7.3 `chore: 发布 v2.1.0`
 
 - 更新 `windows/VERSION`、`macos/VERSION`、`runtime-version.ps1`、两个平台 `injector.mjs` 中的 `SKIN_VERSION`、`src/AssemblyInfo.cs`、README 的版本号和安装包名、两个平台的 CHANGELOG，并新增 `.github/release-notes/v2.1.0.md`。
 - 改完后全仓搜索 `2.0.1`，确认没有漏改的版本常量（参考 `f172ede` 的改动范围）。
