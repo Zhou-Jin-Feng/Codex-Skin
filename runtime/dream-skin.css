@@ -167,6 +167,20 @@ html[data-dream-skin="active"] {
     backdrop-filter: none !important;
   }
 
+  /* 26.930 puts two decorative layers in the thread scroll footer: an opaque
+     bg-surface plate spanning the whole footer (bound as a panel, it became a
+     full-width dark band) and a from-surface fade above it. The composer root
+     keeps its own surface, as on Home; only these full-width, non-interactive
+     layers are cleared (inset-x-0 keeps the round scroll-to-bottom button,
+     also pointer-events-none while hidden, on its native plate). This lives
+     in this layer so it outranks the panel binding. */
+  html[data-dream-skin="active"] [data-thread-scroll-footer]
+    [class~="pointer-events-none"][class~="absolute"][class~="inset-x-0"]:is([class~="bg-surface"], [class~="bg-gradient-to-t"]):not([data-codex-composer-root] *) {
+    background: transparent !important;
+    background-image: none !important;
+    backdrop-filter: none !important;
+  }
+
   html[data-dream-skin="active"] [data-ds-surface] {
     --app-shell-panel-background: transparent !important;
     --color-codex-terminal-background: transparent !important;
