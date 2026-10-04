@@ -133,7 +133,9 @@ namespace CodexDreamSkinManager
             ScriptResult result = await PowerShellRunner.RunAsync(managerScript,
                 new[] { P("-Action"), V("Status"), P("-Quick"), P("-SkipThemes"),
                     P("-SkillRoot"), V(Path.Combine(rootDirectory, "windows")) }, ReadTimeoutMilliseconds);
-            return ParseStatus(result.Output);
+            DreamSkinStatus status = ParseStatus(result.Output);
+            SaveReadCache(StatusCacheName, result.Output);
+            return status;
         }
 
         public async Task<DreamSkinStatus> GetThemesAsync()
@@ -142,7 +144,119 @@ namespace CodexDreamSkinManager
             ScriptResult result = await PowerShellRunner.RunAsync(managerScript,
                 new[] { P("-Action"), V("ListThemes"),
                     P("-SkillRoot"), V(Path.Combine(rootDirectory, "windows")) }, ReadTimeoutMilliseconds);
-            return ParseStatus(result.Output);
+            DreamSkinStatus catalog = ParseStatus(result.Output);
+            SaveReadCache(CatalogCacheName, result.Output);
+            return catalog;
+        }
+
+        // True when this layout carries a complete skin runtime. Fast paths and
+        // read caches apply only then, never to partial layouts such as fixtures.
+        public bool HasInstalledRuntime
+        {
+            get
+            {
+                if (!hasInstalledRuntime.HasValue)
+                    hasInstalledRuntime = LiveSessionProbe.ComputeRuntimeFingerprint(Path.Combine(rootDirectory, "windows")).Length > 0;
+                return hasInstalledRuntime.Value;
+            }
+        }
+
+        public Task<LiveSessionReport> ProbeLiveSessionAsync()
+        {
+            string skillRoot = Path.Combine(rootDirectory, "windows");
+            return Task.Run(() => LiveSessionProbe.Probe(skillRoot));
+        }
+
+        // The last theme catalog, shown at startup while the fresh one loads.
+        public DreamSkinStatus TryLoadCachedCatalog()
+        {
+            string json = ReadReadCache(CatalogCacheName);
+            if (json == null) return null;
+            try { return ParseStatus(json); }
+            catch { return null; }
+        }
+
+        // Status for a session the caller has just verified live: the last full
+        // status supplies static details (supported actions, versions), while the
+        // running, pause and active-theme fields are read fresh from disk.
+        public DreamSkinStatus TryReadVerifiedStatus()
+        {
+            if (!HasInstalledRuntime) return null;
+            DreamSkinStatus status;
+            try
+            {
+                string cached = ReadReadCache(StatusCacheName);
+                status = cached == null ? new DreamSkinStatus() : ParseStatus(cached);
+                string stateRoot = ManagerPaths.StateRoot;
+                string activeTheme = Path.Combine(stateRoot, "active-theme", "theme.json");
+                Dictionary<string, object> theme = new JavaScriptSerializer()
+                    .Deserialize<Dictionary<string, object>>(File.ReadAllText(activeTheme, System.Text.Encoding.UTF8));
+                if (theme == null) return null;
+                status.IsRunning = true;
+                status.IsPaused = File.Exists(Path.Combine(stateRoot, "paused"));
+                status.StatusKind = status.IsPaused ? "paused" : "running";
+                status.StatusMessage = "";
+                status.RendererStatus = "unchecked";
+                status.RendererMessage = "";
+                status.ActiveThemeId = ReadString(theme, "id", "");
+                status.ActiveThemeName = ReadString(theme, "name", "");
+                string image = ReadString(theme, "image", "");
+                status.ActiveThemeImage = image.Length == 0 ? "" : Path.Combine(stateRoot, "active-theme", image);
+                object artValue;
+                Dictionary<string, object> art = theme.TryGetValue("art", out artValue)
+                    ? artValue as Dictionary<string, object> : null;
+                art = art ?? new Dictionary<string, object>();
+                status.ActiveFocusX = ReadDouble(art, "focusX", 0.5);
+                status.ActiveFocusY = ReadDouble(art, "focusY", 0.5);
+                status.ActivePositionX = ReadDouble(art, "positionX", 0.0);
+                status.ActivePositionY = ReadDouble(art, "positionY", 0.0);
+                status.ActiveZoom = ReadDouble(art, "zoom", 1.0);
+                status.ActivePositionMode = ReadString(art, "positionMode", "locked");
+                // Same rule as Test-ManagerThemeFraming in manager-actions.ps1.
+                status.ActiveFramingEnabled = art.ContainsKey("positionX") || art.ContainsKey("positionY") ||
+                    art.ContainsKey("zoom") || art.ContainsKey("positionMode");
+                status.Themes = new List<ThemeOption>();
+            }
+            catch
+            {
+                return null;
+            }
+            return status;
+        }
+
+        private const string StatusCacheName = "manager-status-cache.json";
+        private const string CatalogCacheName = "manager-catalog-cache.json";
+        private bool? hasInstalledRuntime;
+
+        private void SaveReadCache(string name, string json)
+        {
+            if (!HasInstalledRuntime || string.IsNullOrWhiteSpace(json)) return;
+            try
+            {
+                string path = Path.Combine(ManagerPaths.StateRoot, name);
+                string temporary = path + ".tmp";
+                File.WriteAllText(temporary, json, new System.Text.UTF8Encoding(false));
+                if (File.Exists(path)) File.Replace(temporary, path, null);
+                else File.Move(temporary, path);
+            }
+            catch
+            {
+                // A read cache only speeds up the next start.
+            }
+        }
+
+        private string ReadReadCache(string name)
+        {
+            if (!HasInstalledRuntime) return null;
+            try
+            {
+                string path = Path.Combine(ManagerPaths.StateRoot, name);
+                return File.Exists(path) ? File.ReadAllText(path, System.Text.Encoding.UTF8) : null;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         public static UpdateCheckResult ParseUpdateResult(string json)
@@ -293,14 +407,6 @@ namespace CodexDreamSkinManager
                 try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
                 try { if (File.Exists(request)) File.Delete(request); } catch { }
             }
-        }
-
-        // True only when the recorded injector and browser session are both
-        // verifiably alive; false means "unknown", never "broken".
-        public Task<bool> IsLiveSessionHealthyAsync()
-        {
-            string skillRoot = Path.Combine(rootDirectory, "windows");
-            return Task.Run(() => LiveSessionProbe.IsHealthy(skillRoot));
         }
 
         public async Task<bool> ApplyThemeAsync(ThemeOption theme, bool deferLiveApply = false)

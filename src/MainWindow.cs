@@ -211,7 +211,7 @@ namespace CodexDreamSkinManager
                 UpdateThemeGridHeight();
                 if (initialRefreshStarted) return;
                 initialRefreshStarted = true;
-                await RefreshStatusAsync();
+                await InitialLoadAsync(true);
             };
         }
 
@@ -223,8 +223,40 @@ namespace CodexDreamSkinManager
             {
                 if (initialRefreshStarted) return;
                 initialRefreshStarted = true;
-                await RefreshStatusAsync(false);
+                await InitialLoadAsync(false);
             }));
+        }
+
+        // A cold start used to block every control behind two PowerShell reads.
+        // Show the last catalog at once; when the recorded session verifies live
+        // in process, show its status and refresh the catalog without blocking.
+        private async Task InitialLoadAsync(bool reportErrors)
+        {
+            if (service != null && service.HasInstalledRuntime)
+            {
+                DreamSkinStatus cached = service.TryLoadCachedCatalog();
+                if (cached != null && allThemes.Count == 0)
+                {
+                    currentStatus.Themes = cached.Themes;
+                    PopulateThemes(cached.Themes);
+                    RefreshDashboardPreview();
+                }
+                LiveSessionReport session = await service.ProbeLiveSessionAsync();
+                DreamSkinStatus verified = session.State == LiveSessionState.Healthy ? service.TryReadVerifiedStatus() : null;
+                if (verified != null)
+                {
+                    verified.Themes = new List<ThemeOption>(allThemes);
+                    verified.Message = currentStatus.Message;
+                    currentStatus = verified;
+                    UpdateStatusDisplay(currentStatus);
+                    RefreshDashboardPreview();
+                    UpdateActionState();
+                    string catalogError = await RefreshThemeCatalogAsync();
+                    if (reportErrors && catalogError.Length > 0) SetMessage(catalogError, true);
+                    return;
+                }
+            }
+            await RefreshStatusAsync(reportErrors);
         }
 
         public void ShowFromTray()
@@ -1372,10 +1404,11 @@ namespace CodexDreamSkinManager
             bool applied = await RunNamedOperationAsync(async delegate
             {
                 SetMessage("正在读取连接状态...", false);
+                LiveSessionReport session = restart ? new LiveSessionReport() : await service.ProbeLiveSessionAsync();
                 // A verified live session takes the fast path: the apply script
                 // re-checks the injector identity itself, and a failed live apply
                 // still falls through to the startup reconciliation below.
-                if (!restart && await service.IsLiveSessionHealthyAsync())
+                if (session.State == LiveSessionState.Healthy)
                 {
                     SetMessage("正在应用主题...", false);
                     if (await service.ApplyThemeAsync(theme, false))
@@ -1409,11 +1442,15 @@ namespace CodexDreamSkinManager
                     bool video = string.Equals(Path.GetExtension(theme.ImagePath), ".mp4", StringComparison.OrdinalIgnoreCase);
                     bool needsStart = !currentStatus.IsRunning ||
                         string.Equals(currentStatus.StatusKind, "degraded", StringComparison.OrdinalIgnoreCase);
+                    // The quick status only inspects the injector process. When
+                    // Codex itself runs without the debugging endpoint, a live
+                    // apply cannot succeed: go straight to the restart consent.
+                    if (session.RestartCertain) needsStart = true;
                     // A video connection is temporary: after validation startup
                     // closes it to install the selected theme's native appearance.
                     bool restartAuthorized = false;
                     if (needsStart || restart)
-                        restartAuthorized = await ConfirmStartupIfRequiredAsync("应用主题", restart || (video && needsStart));
+                        restartAuthorized = await ConfirmStartupIfRequiredAsync("应用主题", restart || (video && needsStart), session);
                     needsStart = needsStart || restartAuthorized;
                     if (needsStart && video)
                     {
@@ -1508,17 +1545,30 @@ namespace CodexDreamSkinManager
             }, "皮肤已启用。", true, "启用皮肤");
         }
 
-        private async Task<bool> ConfirmStartupIfRequiredAsync(string operation, bool forceRestart)
+        private async Task<bool> ConfirmStartupIfRequiredAsync(string operation, bool forceRestart,
+            LiveSessionReport session = null)
         {
             bool requiresRestart = forceRestart;
-            try
+            if (session == null) session = await service.ProbeLiveSessionAsync();
+            if (session.RestartCertain)
             {
-                await service.CheckStartupAsync();
-            }
-            catch (Exception ex)
-            {
-                if (ex.Message.IndexOf("DREAM_SKIN_RESTART_REQUIRED:", StringComparison.Ordinal) < 0) throw;
+                // Codex is open without the skin's debugging endpoint; the startup
+                // check would only reach the same conclusion several seconds later.
                 requiresRestart = true;
+            }
+            else if (forceRestart || session.State != LiveSessionState.Healthy)
+            {
+                // A verified endpoint never needs a restart; anything else asks
+                // the startup script, which owns the full identity checks.
+                try
+                {
+                    await service.CheckStartupAsync();
+                }
+                catch (Exception ex)
+                {
+                    if (ex.Message.IndexOf("DREAM_SKIN_RESTART_REQUIRED:", StringComparison.Ordinal) < 0) throw;
+                    requiresRestart = true;
+                }
             }
             if (requiresRestart && !ConfirmRestart(operation))
                 throw new OperationCanceledException("已取消操作，未切换主题或重启 Codex。");

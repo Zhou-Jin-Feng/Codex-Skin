@@ -11,15 +11,40 @@ using System.Web.Script.Serialization;
 
 namespace CodexDreamSkinManager
 {
-    // A fast, read-only health check of the recorded skin session, done in
-    // process instead of through a PowerShell status read. It only ever answers
-    // "certainly healthy" or "unknown": callers fall back to the full status read
-    // whenever any check fails, and the apply script still verifies the injector
-    // identity itself before touching the renderer.
+    internal enum LiveSessionState
+    {
+        // Nothing can be concluded; callers take the full PowerShell path.
+        Unknown,
+        // Recorded injector and browser session verified end to end.
+        Healthy,
+        // Nothing listens on the recorded debugging port.
+        BrowserUnreachable
+    }
+
+    internal sealed class LiveSessionReport
+    {
+        public LiveSessionState State = LiveSessionState.Unknown;
+        // Null when the Codex processes could not be inspected.
+        public bool? CodexRunning;
+
+        // Codex is open without the skin's debugging endpoint, so connecting
+        // requires a restart; a live apply or a separate check cannot succeed.
+        public bool RestartCertain
+        {
+            get { return State == LiveSessionState.BrowserUnreachable && CodexRunning == true; }
+        }
+    }
+
+    // A fast, read-only probe of the recorded skin session, done in process
+    // instead of through a PowerShell status read. Its conclusions are only
+    // shortcuts: anything inconclusive is Unknown so callers take the full path,
+    // and the scripts still verify identities themselves before acting.
     internal static class LiveSessionProbe
     {
         private static readonly Regex BrowserIdPattern = new Regex("^[A-Za-z0-9._-]{1,200}$", RegexOptions.CultureInvariant);
         private const int CdpTimeoutMilliseconds = 800;
+        private const int PortProbeTimeoutMilliseconds = 400;
+        private const int DefaultPort = 9335;
         private static readonly string[] BaseRuntimeFiles = {
             @"scripts\injector.mjs", @"assets\renderer-inject.js", @"assets\dream-skin.css"
         };
@@ -30,34 +55,131 @@ namespace CodexDreamSkinManager
 
         public static bool IsHealthy(string skillRoot)
         {
-            return IsHealthy(Path.Combine(ManagerPaths.StateRoot, "state.json"), skillRoot);
+            return Probe(skillRoot).State == LiveSessionState.Healthy;
         }
 
-        internal static bool IsHealthy(string statePath, string skillRoot)
+        public static LiveSessionReport Probe(string skillRoot)
         {
+            return Probe(Path.Combine(ManagerPaths.StateRoot, "state.json"), skillRoot);
+        }
+
+        internal static LiveSessionReport Probe(string statePath, string skillRoot)
+        {
+            LiveSessionReport report = new LiveSessionReport();
             try
             {
-                if (!File.Exists(statePath)) return false;
-                Dictionary<string, object> state = new JavaScriptSerializer()
-                    .Deserialize<Dictionary<string, object>>(File.ReadAllText(statePath, Encoding.UTF8));
-                if (state == null) return false;
-                object connectionOnly;
-                if (state.TryGetValue("connectionOnly", out connectionOnly) && connectionOnly is bool && (bool)connectionOnly)
-                    return false;
-                int port = ReadInt(state, "port");
-                int injectorPid = ReadInt(state, "injectorPid");
-                string browserId = ReadString(state, "browserId");
-                string recordedStart = ReadString(state, "injectorStartedAt");
-                if (port < 1024 || port > 65535 || injectorPid <= 0 || !BrowserIdPattern.IsMatch(browserId) ||
-                    string.IsNullOrWhiteSpace(recordedStart))
-                    return false;
-                return RuntimeMatches(skillRoot, ReadString(state, "injectorPath"), ReadString(state, "runtimeFingerprint")) &&
-                    InjectorMatches(injectorPid, recordedStart) && BrowserMatches(port, browserId);
+                // Shortcuts apply only to a real installed runtime; a layout
+                // without one (such as a test fixture) always takes the full path.
+                if (ComputeRuntimeFingerprint(skillRoot).Length == 0) return report;
+                Dictionary<string, object> state = null;
+                if (File.Exists(statePath))
+                    state = new JavaScriptSerializer()
+                        .Deserialize<Dictionary<string, object>>(File.ReadAllText(statePath, Encoding.UTF8));
+                int port = state == null ? 0 : ReadInt(state, "port");
+                if (port < 1024 || port > 65535) port = DefaultPort;
+                report.CodexRunning = DetectCodexRunning();
+                if (state != null && IsVerifiedSession(state, port, skillRoot))
+                {
+                    report.State = LiveSessionState.Healthy;
+                    return report;
+                }
+                // Any listener, even an unverified one, is left for the startup
+                // script to judge: it may be a restarted skinned Codex.
+                if (!IsPortListening(port)) report.State = LiveSessionState.BrowserUnreachable;
             }
             catch
             {
-                return false;
+                report.State = LiveSessionState.Unknown;
             }
+            return report;
+        }
+
+        private static bool IsVerifiedSession(Dictionary<string, object> state, int port, string skillRoot)
+        {
+            object connectionOnly;
+            if (state.TryGetValue("connectionOnly", out connectionOnly) && connectionOnly is bool && (bool)connectionOnly)
+                return false;
+            int injectorPid = ReadInt(state, "injectorPid");
+            string browserId = ReadString(state, "browserId");
+            string recordedStart = ReadString(state, "injectorStartedAt");
+            if (port != ReadInt(state, "port") || injectorPid <= 0 || !BrowserIdPattern.IsMatch(browserId) ||
+                string.IsNullOrWhiteSpace(recordedStart))
+                return false;
+            return RuntimeMatches(skillRoot, ReadString(state, "injectorPath"), ReadString(state, "runtimeFingerprint")) &&
+                InjectorMatches(injectorPid, recordedStart) && BrowserMatches(port, browserId);
+        }
+
+        private static bool IsPortListening(int port)
+        {
+            using (System.Net.Sockets.TcpClient client = new System.Net.Sockets.TcpClient())
+            {
+                try
+                {
+                    IAsyncResult attempt = client.BeginConnect(IPAddress.Loopback, port, null, null);
+                    if (!attempt.AsyncWaitHandle.WaitOne(PortProbeTimeoutMilliseconds)) return true;
+                    client.EndConnect(attempt);
+                    return true;
+                }
+                catch (System.Net.Sockets.SocketException ex)
+                {
+                    // Only an explicit refusal proves that nothing listens.
+                    return ex.SocketErrorCode != System.Net.Sockets.SocketError.ConnectionRefused;
+                }
+            }
+        }
+
+        // True when an OpenAI Codex Store package process is running, false when
+        // none is, and null when a candidate process could not be inspected.
+        private static bool? DetectCodexRunning()
+        {
+            Process[] candidates = Process.GetProcessesByName("ChatGPT");
+            bool uninspectable = false;
+            try
+            {
+                foreach (Process process in candidates)
+                {
+                    string path = ProcessImagePath(process.Id);
+                    if (path == null) { uninspectable = true; continue; }
+                    if (path.IndexOf(@"\WindowsApps\OpenAI.Codex_", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+                }
+            }
+            finally
+            {
+                foreach (Process process in candidates) process.Dispose();
+            }
+            if (uninspectable) return null;
+            return false;
+        }
+
+        private static string ProcessImagePath(int processId)
+        {
+            IntPtr handle = NativeMethods.OpenProcess(NativeMethods.ProcessQueryLimitedInformation, false, processId);
+            if (handle == IntPtr.Zero) return null;
+            try
+            {
+                StringBuilder buffer = new StringBuilder(1024);
+                int size = buffer.Capacity;
+                return NativeMethods.QueryFullProcessImageName(handle, 0, buffer, ref size) ? buffer.ToString(0, size) : null;
+            }
+            finally
+            {
+                NativeMethods.CloseHandle(handle);
+            }
+        }
+
+        private static class NativeMethods
+        {
+            internal const int ProcessQueryLimitedInformation = 0x1000;
+
+            [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+            internal static extern IntPtr OpenProcess(int access, bool inheritHandle, int processId);
+
+            [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true,
+                CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+            internal static extern bool QueryFullProcessImageName(IntPtr process, int flags, StringBuilder name, ref int size);
+
+            [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+            internal static extern bool CloseHandle(IntPtr handle);
         }
 
         // Mirrors Test-DreamSkinRuntimeCurrent: the running injector must come
