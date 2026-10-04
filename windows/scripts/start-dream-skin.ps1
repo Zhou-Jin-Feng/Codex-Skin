@@ -19,6 +19,8 @@ $Injector = Join-Path $PSScriptRoot 'injector.mjs'
 . (Join-Path $PSScriptRoot 'common-windows.ps1')
 . (Join-Path $PSScriptRoot 'theme-windows.ps1')
 . (Join-Path $PSScriptRoot 'localization-windows.ps1')
+# One startup run resolves the registered Codex packages several times.
+$script:DreamSkinRegisteredCodexInstallsCacheEnabled = $true
 
 function Invoke-DreamSkinStartupAppearanceRecovery {
   param(

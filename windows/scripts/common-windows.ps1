@@ -855,7 +855,19 @@ function Get-DreamSkinSupportedPackageNames {
   return @('OpenAI.Codex')
 }
 
+# Opt-in per process (start-dream-skin.ps1 enables it): one startup resolves
+# the registered packages three times, each Appx query costing about a second.
+# The short lifetime bounds staleness if a long-lived host ever enables it.
+$script:DreamSkinRegisteredCodexInstallsCacheEnabled = $false
+$script:DreamSkinRegisteredCodexInstallsCache = $null
+$script:DreamSkinRegisteredCodexInstallsCachedAt = [DateTime]::MinValue
+
 function Get-DreamSkinRegisteredCodexInstalls {
+  if ($script:DreamSkinRegisteredCodexInstallsCacheEnabled -and
+    $null -ne $script:DreamSkinRegisteredCodexInstallsCache -and
+    ([DateTime]::UtcNow - $script:DreamSkinRegisteredCodexInstallsCachedAt).TotalSeconds -lt 60) {
+    return @($script:DreamSkinRegisteredCodexInstallsCache)
+  }
   $packages = @()
   foreach ($packageName in @(Get-DreamSkinSupportedPackageNames)) {
     try {
@@ -874,6 +886,10 @@ function Get-DreamSkinRegisteredCodexInstalls {
   foreach ($package in $packages) {
     $install = ConvertTo-DreamSkinCodexInstall -Package $package
     if ($null -ne $install) { $installs += $install }
+  }
+  if ($script:DreamSkinRegisteredCodexInstallsCacheEnabled) {
+    $script:DreamSkinRegisteredCodexInstallsCache = @($installs)
+    $script:DreamSkinRegisteredCodexInstallsCachedAt = [DateTime]::UtcNow
   }
   return $installs
 }
