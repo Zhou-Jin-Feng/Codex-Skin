@@ -44,7 +44,9 @@ namespace CodexDreamSkinManager
     {
         private const string EncodedErrorPrefix = "__CODEX_DREAM_SKIN_ERROR_UTF8__";
         // How long a host may keep running after writing its completion markers.
-        private const int LingeringExitGraceMilliseconds = 5000;
+        // A healthy host exits within milliseconds; the start script's host was
+        // observed to linger indefinitely after launching Codex on the restart path.
+        private const int LingeringExitGraceMilliseconds = 1500;
 
         public static string QuoteLiteral(string value)
         {

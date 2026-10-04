@@ -43,7 +43,6 @@ namespace CodexDreamSkinManager
     {
         private static readonly Regex BrowserIdPattern = new Regex("^[A-Za-z0-9._-]{1,200}$", RegexOptions.CultureInvariant);
         private const int CdpTimeoutMilliseconds = 800;
-        private const int PortProbeTimeoutMilliseconds = 400;
         private const int DefaultPort = 9335;
         private static readonly string[] BaseRuntimeFiles = {
             @"scripts\injector.mjs", @"assets\renderer-inject.js", @"assets\dream-skin.css"
@@ -109,23 +108,17 @@ namespace CodexDreamSkinManager
                 InjectorMatches(injectorPid, recordedStart) && BrowserMatches(port, browserId);
         }
 
+        // Reads the TCP listener table instead of connecting: Windows retries a
+        // refused loopback connection for about two seconds, so a connect probe
+        // with a short timeout cannot tell "nothing listens" from "slow".
         private static bool IsPortListening(int port)
         {
-            using (System.Net.Sockets.TcpClient client = new System.Net.Sockets.TcpClient())
+            foreach (IPEndPoint listener in System.Net.NetworkInformation.IPGlobalProperties
+                .GetIPGlobalProperties().GetActiveTcpListeners())
             {
-                try
-                {
-                    IAsyncResult attempt = client.BeginConnect(IPAddress.Loopback, port, null, null);
-                    if (!attempt.AsyncWaitHandle.WaitOne(PortProbeTimeoutMilliseconds)) return true;
-                    client.EndConnect(attempt);
-                    return true;
-                }
-                catch (System.Net.Sockets.SocketException ex)
-                {
-                    // Only an explicit refusal proves that nothing listens.
-                    return ex.SocketErrorCode != System.Net.Sockets.SocketError.ConnectionRefused;
-                }
+                if (listener.Port == port) return true;
             }
+            return false;
         }
 
         // True when an OpenAI Codex Store package process is running, false when
