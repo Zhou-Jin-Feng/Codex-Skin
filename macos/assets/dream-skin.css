@@ -167,15 +167,20 @@ html[data-dream-skin="active"] {
     backdrop-filter: none !important;
   }
 
-  /* 26.930 puts two decorative layers in the thread scroll footer: an opaque
-     bg-surface plate spanning the whole footer (bound as a panel, it became a
-     full-width dark band) and a from-surface fade above it. The composer root
-     keeps its own surface, as on Home; only these full-width, non-interactive
-     layers are cleared (inset-x-0 keeps the round scroll-to-bottom button,
-     also pointer-events-none while hidden, on its native plate). This lives
-     in this layer so it outranks the panel binding. */
+  /* 26.930 paints two decorative layers behind the thread composer: an opaque
+     bg-surface plate spanning the thread scroll footer (bound as a panel, it
+     became a full-width dark band) and a from-surface fade, owned by a sticky
+     bottom spacer inside the thread scroll area, that darkens the strip just
+     above it. The composer root keeps its own surface, as on Home; only these
+     full-width, non-interactive layers are cleared (inset-x-0 keeps the round
+     scroll-to-bottom button, also pointer-events-none while hidden, on its
+     native plate; the spacer's direct child keeps collapsed-content fades
+     inside messages untouched). This lives in this layer so it outranks the
+     panel binding. */
   html[data-dream-skin="active"] [data-thread-scroll-footer]
-    [class~="pointer-events-none"][class~="absolute"][class~="inset-x-0"]:is([class~="bg-surface"], [class~="bg-gradient-to-t"]):not([data-codex-composer-root] *) {
+    [class~="pointer-events-none"][class~="absolute"][class~="inset-x-0"]:is([class~="bg-surface"], [class~="bg-gradient-to-t"]):not([data-codex-composer-root] *),
+  html[data-dream-skin="active"] .thread-scroll-container [class~="sticky"][class~="bottom-0"]
+    > [class~="pointer-events-none"][class~="absolute"][class~="inset-x-0"][class~="bg-gradient-to-t"] {
     background: transparent !important;
     background-image: none !important;
     backdrop-filter: none !important;
