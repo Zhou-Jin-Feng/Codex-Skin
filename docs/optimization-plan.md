@@ -27,7 +27,9 @@
 | C4.7 | 脚本已完成但 PowerShell 进程不退出时，不再等到 5 分钟超时 | 已提交，真机确认进程确实滞留（`host lingered`），宽限缩短为 1.5 秒 |
 | C2.3、C2.4 | 跳过重复媒体校验、常驻 PowerShell | 视后续计时再定 |
 | C4.2–C4.4 | 校验前激活窗口、视频解码缓存、条件等待 | 未开始 |
-| C3.3 | 点通知、从开始菜单打开的 Codex 并入皮肤窗口 | 已实现，现有测试通过，待真机点通知验证 |
+| C3.3 | 点通知、从开始菜单打开的 Codex 并入皮肤窗口 | 已提交，真机确认点通知不再另开无皮肤窗口 |
+| C3.6 | 皮肤 profile 共用默认 profile 的 Statsig 设备标识 | 已提交，待下次重启 Codex 时真机确认界面与语言 |
+| C5.3 | 清除 26.930 对话页输入框后的底板和渐变（大黑框） | 已提交，真机确认效果 |
 | 第 3 阶段其余 | 连接保持健康（C3.1、C3.2、C3.4、C3.5） | 用户要求暂缓 |
 
 C2.1 的快速预检与脚本侧一样核对运行时指纹：正在运行的注入器必须来自与当前管理器相同的运行时，否则走原来的完整状态查询。
@@ -256,6 +258,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\diag-runtime.ps1 -Mo
 - 每次决定写入状态目录的 `sentinel.log`（超过 256KB 轮换）。
 - 已知限制：WMI 事件最多约 1 秒延迟，可能短暂闪出一个窗口；能否按 tag 跳到通知对应的对话取决于 Codex 对转发参数的处理，需真机确认；只在管理器运行（含缩在托盘）时生效。
 
+### C3.6 `fix(windows): share the normal profile's Statsig device id with the skin profile`
+
+- 现象：通过管理器重启的 Codex 是英文界面、看起来像旧版；皮肤校验第一次等满 30 秒失败（重启路线从约 44 秒变成 69 秒）；对话页出现大黑框。
+- 取证：只注册了一个 Codex 版本（26.930）；两份数据目录的浏览器版本和浏览器语言设置相同，但 Statsig 设备标识不同。默认 profile 位于 `%LOCALAPPDATA%\Packages\OpenAI.Codex_<id>\LocalCache\Roaming\Codex\web\Codex`，标识自 9 月 3 日沿用至今；皮肤 profile 于 10 月 3 日新建，生成了新标识，被分进另一组灰度实验。
+- 修复：每次以皮肤 profile 拉起 Codex 前（此时 Codex 已关闭），把默认 profile 的 `statsig-stable-id` 写入皮肤 profile 的 `statsig-state.json` 及其 `.bak`；首次覆盖前保留原文件为 `statsig-state.json.before-dreamskin-sync`。只复制这一个标识，不涉及登录与对话数据；任何失败都跳过并记计时点。
+
 ### C3.4 `feat(manager): optionally take over externally launched Codex`
 
 - 托盘菜单增加开关“外部打开的 Codex 自动接管”，默认关闭。
@@ -339,6 +347,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\diag-runtime.ps1 -Mo
 ### C5.1 `fix(renderer): repair adopted stylesheet and re-observe replaced body`
 
 - 每次部件刷新时顺带检查样式表是否还挂着，被覆盖就补回；`body` 被替换时重新挂监听。
+
+### C5.3 `fix(renderer): clear the 26.930 thread footer plate and fade`
+
+- 现象：对话页输入框所在的整条底部是一块深色带，上沿还有一道渐变黑条；首页正常。
+- 取证（CDP 只读，仅元素结构与计算样式）：
+  - 输入框底部容器 `[data-thread-scroll-footer]` 内有一块铺满的 `bg-surface` 底板，被皮肤的面板识别标成 `data-ds-surface="panel"`，涂上 80% 深色加毛玻璃；
+  - 对话滚动区里吸底占位元素（`sticky bottom-0`）的子元素是一层 `h-8 bg-gradient-to-t from-surface` 渐变（`#111` 到透明）；
+  - 旧的清除规则按 26.818、26.924 的类名写，都不匹配。
+- 修复：在 `@layer dreamskin-surfaces` 内清除这两层的背景和模糊。层内的 `!important` 面板着色会压过层外任何覆盖，所以规则必须写在同一层。范围限定为横向铺满（`inset-x-0`）且不可点击的装饰层：
+  - 输入框内部排除；
+  - “回到底部”圆形按钮（隐藏时同样不可点击）保持原样；
+  - 消息内折叠内容的渐变不受影响。
+- 未改渲染脚本的面板识别逻辑：提示框等元素同样是 `pointer-events-none`，按“不可点击”统一排除会误伤。
 
 ### C5.2 `perf(renderer): throttle part refresh during message streaming`（可选）
 
