@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -176,8 +177,18 @@ namespace CodexDreamSkinManager
         private bool suppressThemeSelection;
         private bool suppressSavedThemeSelection;
         private bool hasValidCustomImage;
+        private bool initialRefreshStarted;
+        private bool exitRequested;
+        private OperationTimer operationTimer;
 
         private readonly Func<string, bool> restartConfirmation;
+
+        // Set by the tray host: closing the window then hides it instead of exiting.
+        public bool MinimizeToTrayOnClose { get; set; }
+        public event EventHandler HiddenToTray;
+        public event Action<string, bool> OperationFinished;
+        public event Action<string> ThemeApplied;
+        public event EventHandler StatusDisplayChanged;
 
         public MainWindow(DreamSkinService service, Func<string, bool> restartConfirmation = null)
         {
@@ -195,7 +206,194 @@ namespace CodexDreamSkinManager
             Content = BuildLayout();
             SizeChanged += delegate { UpdateThemeGridHeight(); };
             UpdateActionState();
-            Loaded += async delegate { UpdateThemeGridHeight(); await RefreshStatusAsync(); };
+            Loaded += async delegate
+            {
+                UpdateThemeGridHeight();
+                if (initialRefreshStarted) return;
+                initialRefreshStarted = true;
+                await InitialLoadAsync(true);
+            };
+        }
+
+        // Starts in the notification area: load status and the theme catalog in
+        // the background so the tray menu works before the window is ever shown.
+        public void StartHidden()
+        {
+            Dispatcher.BeginInvoke(new Action(async delegate
+            {
+                if (initialRefreshStarted) return;
+                initialRefreshStarted = true;
+                await InitialLoadAsync(false);
+            }));
+        }
+
+        // A cold start used to block every control behind two PowerShell reads.
+        // Show the last catalog at once; when the recorded session verifies live
+        // in process, show its status and refresh the catalog without blocking.
+        private async Task InitialLoadAsync(bool reportErrors)
+        {
+            if (service != null && service.HasInstalledRuntime)
+            {
+                DreamSkinStatus cached = service.TryLoadCachedCatalog();
+                if (cached != null && allThemes.Count == 0)
+                {
+                    currentStatus.Themes = cached.Themes;
+                    PopulateThemes(cached.Themes);
+                    RefreshDashboardPreview();
+                }
+                LiveSessionReport session = await service.ProbeLiveSessionAsync();
+                DreamSkinStatus verified = session.State == LiveSessionState.Healthy ? service.TryReadVerifiedStatus() : null;
+                if (verified != null)
+                {
+                    verified.Themes = new List<ThemeOption>(allThemes);
+                    verified.Message = currentStatus.Message;
+                    currentStatus = verified;
+                    UpdateStatusDisplay(currentStatus);
+                    RefreshDashboardPreview();
+                    UpdateActionState();
+                    string catalogError = await RefreshThemeCatalogAsync();
+                    if (reportErrors && catalogError.Length > 0) SetMessage(catalogError, true);
+                    return;
+                }
+            }
+            await RefreshStatusAsync(reportErrors);
+        }
+
+        public void ShowFromTray()
+        {
+            if (!IsVisible) Show();
+            if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+            Activate();
+            // Windows only lets a background process take focus in limited
+            // cases; a brief topmost toggle brings the window to the front.
+            Topmost = true;
+            Topmost = false;
+            Focus();
+        }
+
+        public void ExitFromTray()
+        {
+            exitRequested = true;
+            Close();
+        }
+
+        public void PrepareForSessionEnd()
+        {
+            exitRequested = true;
+        }
+
+        protected override void OnClosing(CancelEventArgs e)
+        {
+            if (MinimizeToTrayOnClose && !exitRequested)
+            {
+                e.Cancel = true;
+                Hide();
+                EventHandler handler = HiddenToTray;
+                if (handler != null) handler(this, EventArgs.Empty);
+                return;
+            }
+            base.OnClosing(e);
+        }
+
+        public bool IsOperationBusy
+        {
+            get { return operationRunning || statusRefreshCount > 0 || imageValidationRunning || updateRunning; }
+        }
+
+        public string ActiveThemeId { get { return currentStatus.ActiveThemeId; } }
+
+        public string TraySummary
+        {
+            get
+            {
+                string status = statusText == null ? "" : statusText.Text;
+                string theme = activeThemeText == null ? "" : activeThemeText.Text;
+                if (string.IsNullOrWhiteSpace(theme) || theme == "未选择") return status;
+                return string.IsNullOrWhiteSpace(status) ? theme : status + " · " + theme;
+            }
+        }
+
+        public bool CanApplyFromTray
+        {
+            get
+            {
+                ActionAvailability state = ActionAvailability.FromStatus(currentStatus, IsOperationBusy, true, false);
+                return service != null && state.CanApplyTheme &&
+                    (state.RequiresRecovery ? service.CanRecover : service.CanManage);
+            }
+        }
+
+        public bool CanTogglePauseFromTray
+        {
+            get
+            {
+                ActionAvailability state = ActionAvailability.FromStatus(currentStatus, IsOperationBusy, false, false);
+                return service != null && service.CanManage && state.CanPause;
+            }
+        }
+
+        public string TrayPauseLabel
+        {
+            get
+            {
+                ActionAvailability state = ActionAvailability.FromStatus(currentStatus, false, false, false);
+                return state.PauseLabel == "继续" ? "继续皮肤" : "暂停皮肤";
+            }
+        }
+
+        public List<ThemeOption> GetThemeSnapshot()
+        {
+            return new List<ThemeOption>(allThemes);
+        }
+
+        public void RequestStatusRefresh()
+        {
+            if (IsOperationBusy || service == null) return;
+            Task ignored = RefreshStatusAsync(false, false);
+        }
+
+        public async Task ApplyThemeFromTrayAsync(string themeId)
+        {
+            if (!await WaitUntilIdleAsync()) return;
+            ThemeOption theme = allThemes.Find(item =>
+                string.Equals(item.Id, themeId, StringComparison.OrdinalIgnoreCase));
+            if (theme == null)
+            {
+                const string missing = "主题列表已变化，请打开管理器重新选择主题。";
+                SetMessage(missing, true);
+                RaiseOperationFinished(missing, true);
+                return;
+            }
+            await ApplyThemeAsync(theme, false);
+        }
+
+        public async Task TogglePauseFromTrayAsync()
+        {
+            if (!await WaitUntilIdleAsync()) return;
+            await TogglePauseAsync();
+        }
+
+        // Opening the tray menu starts a background status read; a click that
+        // lands during it must wait instead of being dropped by the busy guard.
+        private async Task<bool> WaitUntilIdleAsync()
+        {
+            for (int waited = 0; IsOperationBusy && waited < 15000; waited += 100) await Task.Delay(100);
+            if (!IsOperationBusy) return true;
+            const string busy = "管理器正在执行其他操作，请稍后再试。";
+            RaiseOperationFinished(busy, true);
+            return false;
+        }
+
+        // Confirmation dialogs need a visible owner; tray actions run hidden.
+        private void EnsureVisibleForPrompt()
+        {
+            if (!IsVisible) ShowFromTray();
+        }
+
+        private void RaiseOperationFinished(string message, bool error)
+        {
+            Action<string, bool> handler = OperationFinished;
+            if (handler != null) handler(message, error);
         }
 
         public void SetStartupError(string message)
@@ -960,6 +1158,8 @@ namespace CodexDreamSkinManager
             statusDot.Background = statusText.Foreground;
             statusText.ToolTip = BuildStatusDetails(status);
             activeThemeText.Text = string.IsNullOrWhiteSpace(status.ActiveThemeName) ? "未选择" : CleanThemeName(status.ActiveThemeName);
+            EventHandler handler = StatusDisplayChanged;
+            if (handler != null) handler(this, EventArgs.Empty);
         }
 
         private void PopulateThemes(List<ThemeOption> themes)
@@ -1196,9 +1396,37 @@ namespace CodexDreamSkinManager
         {
             ThemeOption theme = themeList.SelectedItem as ThemeOption;
             if (theme == null) { SetMessage("请先选择一个主题。", true); return; }
-            await RunOperationAsync(async delegate
+            await ApplyThemeAsync(theme, restart);
+        }
+
+        private async Task ApplyThemeAsync(ThemeOption theme, bool restart)
+        {
+            bool applied = await RunNamedOperationAsync(async delegate
             {
                 SetMessage("正在读取连接状态...", false);
+                LiveSessionReport session = restart ? new LiveSessionReport() : await service.ProbeLiveSessionAsync();
+                // A verified live session takes the fast path: the apply script
+                // re-checks the injector identity itself, and a failed live apply
+                // still falls through to the startup reconciliation below.
+                if (session.State == LiveSessionState.Healthy)
+                {
+                    SetMessage("正在应用主题...", false);
+                    if (await service.ApplyThemeAsync(theme, false))
+                    {
+                        SetExpectedRuntimeState(true, false);
+                        return;
+                    }
+                    bool reconnectAuthorized;
+                    try { reconnectAuthorized = await ConfirmStartupIfRequiredAsync("恢复皮肤连接", false); }
+                    catch (OperationCanceledException)
+                    {
+                        throw new OperationCanceledException("主题已保存，已取消恢复连接；尚未确认皮肤显示。请重新应用主题。");
+                    }
+                    SetMessage("正在连接皮肤服务并确认显示...", false);
+                    await service.StartAsync(reconnectAuthorized);
+                    SetExpectedRuntimeState(true, false);
+                    return;
+                }
                 // The manager may have stayed open while Codex exited or restarted.
                 currentStatus = await service.GetStatusAsync();
                 ActionAvailability availability = ActionAvailability.FromStatus(currentStatus, false, true, hasValidCustomImage);
@@ -1214,11 +1442,15 @@ namespace CodexDreamSkinManager
                     bool video = string.Equals(Path.GetExtension(theme.ImagePath), ".mp4", StringComparison.OrdinalIgnoreCase);
                     bool needsStart = !currentStatus.IsRunning ||
                         string.Equals(currentStatus.StatusKind, "degraded", StringComparison.OrdinalIgnoreCase);
+                    // The quick status only inspects the injector process. When
+                    // Codex itself runs without the debugging endpoint, a live
+                    // apply cannot succeed: go straight to the restart consent.
+                    if (session.RestartCertain) needsStart = true;
                     // A video connection is temporary: after validation startup
                     // closes it to install the selected theme's native appearance.
                     bool restartAuthorized = false;
                     if (needsStart || restart)
-                        restartAuthorized = await ConfirmStartupIfRequiredAsync("应用主题", restart || (video && needsStart));
+                        restartAuthorized = await ConfirmStartupIfRequiredAsync("应用主题", restart || (video && needsStart), session);
                     needsStart = needsStart || restartAuthorized;
                     if (needsStart && video)
                     {
@@ -1246,7 +1478,12 @@ namespace CodexDreamSkinManager
                     }
                 }
                 SetExpectedRuntimeState(true, false);
-            }, "主题已应用。", false);
+            }, "主题已应用：" + theme.Name, false, "应用主题 " + theme.Name);
+            if (applied)
+            {
+                Action<string> handler = ThemeApplied;
+                if (handler != null) handler(theme.Id);
+            }
         }
 
         private async Task DeleteSelectedThemeAsync()
@@ -1293,7 +1530,7 @@ namespace CodexDreamSkinManager
 
         private async Task EnableAsync()
         {
-            await RunOperationAsync(async delegate
+            await RunNamedOperationAsync(async delegate
             {
                 currentStatus = await service.GetStatusAsync();
                 bool restartAuthorized = await ConfirmStartupIfRequiredAsync("启用皮肤", false);
@@ -1305,20 +1542,33 @@ namespace CodexDreamSkinManager
                     if (!await service.SetPausedAsync(false)) await service.StartAsync(restartAuthorized);
                 }
                 SetExpectedRuntimeState(true, false);
-            }, "皮肤已启用。");
+            }, "皮肤已启用。", true, "启用皮肤");
         }
 
-        private async Task<bool> ConfirmStartupIfRequiredAsync(string operation, bool forceRestart)
+        private async Task<bool> ConfirmStartupIfRequiredAsync(string operation, bool forceRestart,
+            LiveSessionReport session = null)
         {
             bool requiresRestart = forceRestart;
-            try
+            if (session == null) session = await service.ProbeLiveSessionAsync();
+            if (session.RestartCertain)
             {
-                await service.CheckStartupAsync();
-            }
-            catch (Exception ex)
-            {
-                if (ex.Message.IndexOf("DREAM_SKIN_RESTART_REQUIRED:", StringComparison.Ordinal) < 0) throw;
+                // Codex is open without the skin's debugging endpoint; the startup
+                // check would only reach the same conclusion several seconds later.
                 requiresRestart = true;
+            }
+            else if (forceRestart || session.State != LiveSessionState.Healthy)
+            {
+                // A verified endpoint never needs a restart; anything else asks
+                // the startup script, which owns the full identity checks.
+                try
+                {
+                    await service.CheckStartupAsync();
+                }
+                catch (Exception ex)
+                {
+                    if (ex.Message.IndexOf("DREAM_SKIN_RESTART_REQUIRED:", StringComparison.Ordinal) < 0) throw;
+                    requiresRestart = true;
+                }
             }
             if (requiresRestart && !ConfirmRestart(operation))
                 throw new OperationCanceledException("已取消操作，未切换主题或重启 Codex。");
@@ -1327,7 +1577,7 @@ namespace CodexDreamSkinManager
 
         private async Task TogglePauseAsync()
         {
-            await RunOperationAsync(async delegate
+            await RunNamedOperationAsync(async delegate
             {
                 currentStatus = await service.GetStatusAsync();
                 ActionAvailability availability = ActionAvailability.FromStatus(currentStatus, false, false, false);
@@ -1351,7 +1601,7 @@ namespace CodexDreamSkinManager
                         throw new InvalidOperationException("已记录暂停，但无法确认当前窗口已卸下皮肤，请刷新状态后重试。");
                     SetExpectedRuntimeState(currentStatus.IsRunning, true);
                 }
-            }, "皮肤显示状态已更新。");
+            }, "皮肤显示状态已更新。", true, "暂停或继续皮肤");
         }
 
         private async Task ResetSkinAsync()
@@ -1449,10 +1699,18 @@ namespace CodexDreamSkinManager
             currentStatus.RendererMessage = "";
         }
 
-        private async Task RunOperationAsync(Func<Task> action, string success, bool reloadThemes = true)
+        private Task<bool> RunOperationAsync(Func<Task> action, string success, bool reloadThemes = true)
         {
-            if (operationRunning || statusRefreshCount > 0 || service == null) return;
+            return RunNamedOperationAsync(action, success, reloadThemes, null);
+        }
+
+        // Returns true only when the action completed without error or cancellation.
+        private async Task<bool> RunNamedOperationAsync(Func<Task> action, string success, bool reloadThemes,
+            string operationName)
+        {
+            if (operationRunning || statusRefreshCount > 0 || service == null) return false;
             operationRunning = true;
+            operationTimer = new OperationTimer(operationName ?? success);
             UpdateActionState();
             SetMessage("正在执行...", false);
             string finalMessage = success;
@@ -1461,6 +1719,7 @@ namespace CodexDreamSkinManager
             try
             {
                 await action();
+                operationTimer.Mark("action completed");
             }
             catch (OperationCanceledException ex)
             {
@@ -1495,7 +1754,12 @@ namespace CodexDreamSkinManager
                 finalMessage = success + " 状态刷新失败，请点击刷新状态重试。";
                 finalError = true;
             }
+            OperationTimer timer = operationTimer;
+            operationTimer = null;
+            if (timer != null) timer.Finish(cancelled ? "cancelled" : finalError ? "failed" : "succeeded", finalMessage);
             SetMessage(finalMessage, finalError);
+            RaiseOperationFinished(finalMessage, finalError);
+            return !finalError && !cancelled;
         }
 
         private async Task BrowseImageAsync()
@@ -1892,11 +2156,13 @@ namespace CodexDreamSkinManager
         private bool ConfirmRestart(string operation)
         {
             if (restartConfirmation != null) return restartConfirmation(operation);
+            EnsureVisibleForPrompt();
             return MessageBox.Show(this, operation + "需要关闭并重新打开 Codex。是否继续？", "确认操作", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
         }
 
         private bool ConfirmThemeRecoveryRestart(string themeName)
         {
+            EnsureVisibleForPrompt();
             string message = "将应用“" + themeName + "”并重新启动 Codex。未保存的输入可能丢失。\n\n" +
                 "管理器不会终止身份无法确认的进程；若安全检查失败，将中止恢复并保留诊断状态。是否继续？";
             return MessageBox.Show(this, message, "确认应用并重启", MessageBoxButton.YesNo,
@@ -1905,6 +2171,7 @@ namespace CodexDreamSkinManager
 
         private void SetMessage(string message, bool error)
         {
+            if (operationTimer != null) operationTimer.Mark(message);
             if (messageText == null) return;
             messageText.Text = message;
             messageText.Foreground = error ? DangerBrush : MutedBrush;

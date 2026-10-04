@@ -870,8 +870,12 @@ function ConvertTo-ManagerBatchTheme {
 function Remove-ManagerDuplicateImageArchives {
   if (-not (Test-Path -LiteralPath $paths.Images -PathType Container)) { return }
   $seen = @{}
+  # Only files of identical size can be duplicates. Hashing every archive on
+  # each apply made the cost grow with the whole library (videos up to 128 MiB).
   $candidates = @(Get-ChildItem -LiteralPath $paths.Images -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match '^art-' } | Sort-Object LastWriteTimeUtc -Descending)
+    Where-Object { $_.Name -match '^art-' } | Group-Object -Property Length |
+    Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Group } |
+    Sort-Object LastWriteTimeUtc -Descending)
   foreach ($file in $candidates) {
     try {
       Assert-DreamSkinNoReparseComponents -Path $file.FullName
@@ -957,8 +961,10 @@ function Get-ManagerInjectorStatus {
 function Invoke-ManagerLiveApplyIfRunning {
   $state = Read-DreamSkinState -Path $paths.State
   $identity = Get-ManagerInjectorStatus -State $state
+  Write-DreamSkinTimingMark -Stage "injector identity checked ($($identity.Kind))"
   if (-not $identity.Running) { return $false }
   $live = Invoke-DreamSkinLiveApply -StateRoot $StateRoot
+  Write-DreamSkinTimingMark -Stage "live apply finished (applied: $($live.Applied))"
   # Only this failure means the theme was committed but the live session did
   # not apply it. Callers may reconcile startup; validation/write errors must
   # keep failing without being mistaken for a recoverable connection race.
@@ -1309,8 +1315,11 @@ switch ($Action) {
     Get-ManagerImageMetadata -Path $ImagePath | ConvertTo-Json -Depth 4
   }
   'ApplyTheme' {
+    Start-DreamSkinTiming -Source 'manager-actions' -Operation 'ApplyTheme' -StateRoot $StateRoot
     Invoke-ManagerWriteLock {
+      Write-DreamSkinTimingMark -Stage 'write lock acquired'
       Initialize-DreamSkinThemeStore -SkillRoot $SkillRoot -StateRoot $StateRoot -PrepareOnly | Out-Null
+      Write-DreamSkinTimingMark -Stage 'theme store prepared'
       if ($ThemeDirectory) {
         $result = Use-DreamSkinSavedTheme -ThemeDirectory $ThemeDirectory -StateRoot $StateRoot
       } elseif ($ImagePath) {
@@ -1328,9 +1337,12 @@ switch ($Action) {
             -Theme (New-ManagerCustomTheme -ThemeName $Name) -Name $Name -StateRoot $StateRoot
         }
       } else { throw 'ApplyTheme requires ThemeDirectory or ImagePath.' }
+      Write-DreamSkinTimingMark -Stage 'active theme written'
       Set-DreamSkinPaused -Paused $false -StateRoot $StateRoot | Out-Null
       Remove-ManagerDuplicateImageArchives
+      Write-DreamSkinTimingMark -Stage 'image archives deduplicated'
       $rendererApplied = if ($DeferLiveApply) { $false } else { Invoke-ManagerLiveApplyIfRunning }
+      Write-DreamSkinTimingMark -Stage "done (live apply deferred: $([bool]$DeferLiveApply), renderer applied: $([bool]$rendererApplied))"
       [ordered]@{
         id = if ($result.Theme.id) { "$($result.Theme.id)" } else { '' }
         name = "$($result.Theme.name)"

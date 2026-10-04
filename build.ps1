@@ -436,8 +436,11 @@ if (Test-Path -LiteralPath $legacyAppExe) { Remove-Item -LiteralPath $legacyAppE
 $appExe = Join-Path $packageRoot 'CodexDreamSkinManager.exe'
 $appIcon = Join-Path $root 'assets\CodexDreamSkinManager.ico'
 if (-not (Test-Path -LiteralPath $appIcon -PathType Leaf)) { throw 'CodexDreamSkinManager.ico is missing.' }
+# The tray loads the multi-size .ico from resources to pick a crisp 16px frame.
+$iconResource = '/resource:' + $appIcon + ',CodexDreamSkinManager.AppIcon.ico'
 & $csc /nologo /target:winexe /platform:anycpu /optimize+ /out:$appExe `
   $donationResource `
+  $iconResource `
   ('/win32icon:' + $appIcon) `
   /main:CodexDreamSkinManager.Program `
   /reference:System.dll /reference:System.Core.dll /reference:System.Web.Extensions.dll /reference:System.Xml.dll `

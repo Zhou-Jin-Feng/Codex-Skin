@@ -43,6 +43,10 @@ namespace CodexDreamSkinManager
     internal static class PowerShellRunner
     {
         private const string EncodedErrorPrefix = "__CODEX_DREAM_SKIN_ERROR_UTF8__";
+        // How long a host may keep running after writing its completion markers.
+        // A healthy host exits within milliseconds; the start script's host was
+        // observed to linger indefinitely after launching Codex on the restart path.
+        private const int LingeringExitGraceMilliseconds = 1500;
 
         public static string QuoteLiteral(string value)
         {
@@ -75,38 +79,75 @@ namespace CodexDreamSkinManager
                 info.StandardOutputEncoding = Encoding.UTF8;
                 info.StandardErrorEncoding = Encoding.Default;
 
-                using (Process process = Process.Start(info))
+                Stopwatch stopwatch = Stopwatch.StartNew();
+                string outcome = "failed to start";
+                try
                 {
-                    Stopwatch stopwatch = Stopwatch.StartNew();
-                    Task<string> outputTask = ReadScriptOutputAsync(process.StandardOutput, completionMarker);
-                    Task<string> errorTask = ReadScriptOutputAsync(process.StandardError, completionMarker);
-                    if (!process.WaitForExit(timeoutMilliseconds))
+                    using (Process process = Process.Start(info))
                     {
-                        try { if (!process.HasExited) process.Kill(); } catch { }
-                        process.WaitForExit(5000);
-                        throw new TimeoutException(string.Format(CultureInfo.InvariantCulture,
-                            "操作执行超时（{0}，等待 {1} 秒）。操作结果尚未确认，请刷新状态。",
-                            operation, timeoutMilliseconds / 1000.0));
+                        Task<string> outputTask = ReadScriptOutputAsync(process.StandardOutput, completionMarker);
+                        Task<string> errorTask = ReadScriptOutputAsync(process.StandardError, completionMarker);
+                        Task markers = Task.WhenAll(outputTask, errorTask);
+                        bool exited = false;
+                        bool lingering = false;
+                        while (stopwatch.ElapsedMilliseconds < timeoutMilliseconds)
+                        {
+                            if (process.WaitForExit(100)) { exited = true; break; }
+                            if (!markers.IsCompleted) continue;
+                            // The wrapper writes its markers from its outermost finally,
+                            // so the script itself has finished. A host that then fails
+                            // to exit must not hold the caller until the full timeout.
+                            exited = process.WaitForExit(LingeringExitGraceMilliseconds);
+                            lingering = !exited;
+                            break;
+                        }
+                        if (!exited && !lingering)
+                        {
+                            outcome = "timeout";
+                            try { if (!process.HasExited) process.Kill(); } catch { }
+                            process.WaitForExit(5000);
+                            throw new TimeoutException(string.Format(CultureInfo.InvariantCulture,
+                                "操作执行超时（{0}，等待 {1} 秒）。操作结果尚未确认，请刷新状态。",
+                                operation, timeoutMilliseconds / 1000.0));
+                        }
+                        int remainingMilliseconds = Math.Max(0,
+                            timeoutMilliseconds - (int)Math.Min(stopwatch.ElapsedMilliseconds, int.MaxValue));
+                        int exitCode;
+                        if (lingering)
+                        {
+                            // Only the wrapper's catch writes the encoded error marker
+                            // before exiting with 1; without it the script succeeded.
+                            exitCode = ExtractEncodedError(outputTask.Result).Length > 0 ? 1 : 0;
+                            outcome = "exit " + exitCode.ToString(CultureInfo.InvariantCulture) +
+                                " inferred; host lingered after completion and was stopped";
+                            try { if (!process.HasExited) process.Kill(); } catch { }
+                        }
+                        else
+                        {
+                            exitCode = process.ExitCode;
+                            outcome = "exit " + exitCode.ToString(CultureInfo.InvariantCulture);
+                        }
+                        if (!Task.WaitAll(new Task[] { outputTask, errorTask }, Math.Min(2000, remainingMilliseconds)))
+                            throw new TimeoutException(string.Format(CultureInfo.InvariantCulture,
+                                "脚本已退出，但输出未完整回收（{0}，退出码 {1}）。请刷新状态确认操作结果。",
+                                operation, exitCode));
+                        ScriptResult result = new ScriptResult();
+                        result.ExitCode = exitCode;
+                        result.Output = outputTask.Result.Trim();
+                        result.Error = NormalizePowerShellError(errorTask.Result);
+                        if (result.ExitCode != 0)
+                        {
+                            string encodedError = ExtractEncodedError(result.Output);
+                            throw new InvalidOperationException(!string.IsNullOrWhiteSpace(encodedError)
+                                ? encodedError
+                                : (string.IsNullOrWhiteSpace(result.Error) ? result.Output : result.Error));
+                        }
+                        return result;
                     }
-                    int remainingMilliseconds = Math.Max(0,
-                        timeoutMilliseconds - (int)Math.Min(stopwatch.ElapsedMilliseconds, int.MaxValue));
-                    int exitCode = process.ExitCode;
-                    if (!Task.WaitAll(new Task[] { outputTask, errorTask }, Math.Min(2000, remainingMilliseconds)))
-                        throw new TimeoutException(string.Format(CultureInfo.InvariantCulture,
-                            "脚本已退出，但输出未完整回收（{0}，退出码 {1}）。请刷新状态确认操作结果。",
-                            operation, exitCode));
-                    ScriptResult result = new ScriptResult();
-                    result.ExitCode = exitCode;
-                    result.Output = outputTask.Result.Trim();
-                    result.Error = NormalizePowerShellError(errorTask.Result);
-                    if (result.ExitCode != 0)
-                    {
-                        string encodedError = ExtractEncodedError(result.Output);
-                        throw new InvalidOperationException(!string.IsNullOrWhiteSpace(encodedError)
-                            ? encodedError
-                            : (string.IsNullOrWhiteSpace(result.Error) ? result.Output : result.Error));
-                    }
-                    return result;
+                }
+                finally
+                {
+                    OperationTimingLog.Write("script " + operation, outcome, stopwatch.ElapsedMilliseconds);
                 }
             });
         }

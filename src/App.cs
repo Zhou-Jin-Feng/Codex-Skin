@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
@@ -9,19 +10,28 @@ namespace CodexDreamSkinManager
     internal static class Program
     {
         private const string InstanceName = "Local\\CodexDreamSkinManager-1.1";
+        private const string ActivationEventName = "Local\\CodexDreamSkinManager-1.1-show";
 
         [STAThread]
-        private static void Main()
+        private static void Main(string[] args)
         {
+            bool startInTray = Array.Exists(args ?? new string[0], argument =>
+                string.Equals(argument, ManagerAutostart.TrayArgument, StringComparison.OrdinalIgnoreCase));
             using (SingleInstanceGuard guard = SingleInstanceGuard.TryAcquire(InstanceName))
             {
                 if (guard == null)
                 {
-                    ExistingWindowActivator.Activate("Codex Dream Skin Manager");
+                    // A login-time "--tray" start must not pop up a running manager.
+                    if (startInTray) return;
+                    if (!InstanceActivationListener.TrySignal(ActivationEventName))
+                        ExistingWindowActivator.Activate("Codex Dream Skin Manager");
                     return;
                 }
+                OperationTimingLog.Enabled = true;
                 Application application = new Application();
-                application.ShutdownMode = ShutdownMode.OnMainWindowClose;
+                // The window hides to the tray on close; only the tray's Exit
+                // (or the end of the Windows session) shuts the manager down.
+                application.ShutdownMode = ShutdownMode.OnExplicitShutdown;
                 DreamSkinService service = null;
                 string startupError = "";
                 try
@@ -35,8 +45,81 @@ namespace CodexDreamSkinManager
 
                 MainWindow window = new MainWindow(service);
                 if (!string.IsNullOrWhiteSpace(startupError)) window.SetStartupError(startupError);
-                application.Run(window);
+                window.MinimizeToTrayOnClose = true;
+                window.Closed += delegate { application.Shutdown(); };
+                application.SessionEnding += delegate { window.PrepareForSessionEnd(); };
+                string executablePath = Assembly.GetEntryAssembly().Location;
+                string settingsPath = ManagerSettings.DefaultPath;
+                TrayHost trayHost = null;
+                try
+                {
+                    trayHost = new TrayHost(window, ManagerSettings.Load(settingsPath), settingsPath, executablePath);
+                }
+                catch (Exception ex)
+                {
+                    // Without a tray the manager must stay usable as a plain
+                    // window that exits on close.
+                    window.MinimizeToTrayOnClose = false;
+                    startInTray = false;
+                    OperationTimingLog.Write("tray", "unavailable: " + ex.Message, 0);
+                }
+                using (TrayHost tray = trayHost)
+                using (InstanceActivationListener listener = InstanceActivationListener.Start(ActivationEventName,
+                    delegate { window.Dispatcher.BeginInvoke(new Action(window.ShowFromTray)); }))
+                {
+                    if (startInTray) window.StartHidden();
+                    else window.Show();
+                    application.Run();
+                }
             }
+        }
+    }
+
+    // Lets a second launch bring the running manager forward even while its
+    // window is hidden in the tray, where a title lookup no longer finds it.
+    internal sealed class InstanceActivationListener : IDisposable
+    {
+        private EventWaitHandle signal;
+        private RegisteredWaitHandle registration;
+
+        private InstanceActivationListener(EventWaitHandle signal, RegisteredWaitHandle registration)
+        {
+            this.signal = signal;
+            this.registration = registration;
+        }
+
+        // Returns null when the event cannot be created; a second launch then
+        // falls back to the title-based activation.
+        public static InstanceActivationListener Start(string name, Action onSignal)
+        {
+            EventWaitHandle handle = null;
+            try
+            {
+                handle = new EventWaitHandle(false, EventResetMode.AutoReset, name);
+                RegisteredWaitHandle wait = ThreadPool.RegisterWaitForSingleObject(handle,
+                    delegate { onSignal(); }, null, Timeout.Infinite, false);
+                return new InstanceActivationListener(handle, wait);
+            }
+            catch (Exception)
+            {
+                if (handle != null) handle.Dispose();
+                return null;
+            }
+        }
+
+        public static bool TrySignal(string name)
+        {
+            EventWaitHandle handle;
+            if (!EventWaitHandle.TryOpenExisting(name, out handle)) return false;
+            using (handle) return handle.Set();
+        }
+
+        public void Dispose()
+        {
+            if (registration != null) registration.Unregister(null);
+            registration = null;
+            if (signal != null) signal.Dispose();
+            signal = null;
         }
     }
 

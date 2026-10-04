@@ -25,6 +25,51 @@ $script:DreamSkinStartAppearanceRecoveryStates = @(
   'preserved-rendered'
 )
 
+$script:DreamSkinTimingStopwatch = $null
+$script:DreamSkinTimingRoot = ''
+$script:DreamSkinTimingSource = ''
+$script:DreamSkinTimingOperation = ''
+$script:DreamSkinTimingMaxBytes = 512KB
+
+# Stage timings shared with the manager in timing.log under the caller's state
+# root. Diagnostic only: a full disk or a locked log must never change the
+# outcome of the measured operation.
+function Start-DreamSkinTiming {
+  param(
+    [Parameter(Mandatory = $true)][string]$Source,
+    [Parameter(Mandatory = $true)][string]$Operation,
+    [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'CodexDreamSkin')
+  )
+  $script:DreamSkinTimingRoot = $StateRoot
+  $script:DreamSkinTimingSource = $Source
+  $script:DreamSkinTimingOperation = $Operation
+  $script:DreamSkinTimingStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  Write-DreamSkinTimingMark -Stage 'start'
+}
+
+function Write-DreamSkinTimingMark {
+  param([Parameter(Mandatory = $true)][string]$Stage)
+  try {
+    if ($null -eq $script:DreamSkinTimingStopwatch) { return }
+    $root = $script:DreamSkinTimingRoot
+    if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) { return }
+    $path = Join-Path $root 'timing.log'
+    $existing = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    if ($null -ne $existing -and $existing.Length -gt $script:DreamSkinTimingMaxBytes) {
+      Move-Item -LiteralPath $path -Destination ($path + '.1') -Force -ErrorAction SilentlyContinue
+    }
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    $line = [string]::Format($invariant, "{0} [{1}#{2}] {3} :: {4} (+{5} ms)`r`n",
+      (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss.fffzzz', $invariant),
+      $script:DreamSkinTimingSource, $PID, $script:DreamSkinTimingOperation, $Stage,
+      $script:DreamSkinTimingStopwatch.ElapsedMilliseconds)
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($line)
+    $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write,
+      ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+  } catch {}
+}
+
 function New-DreamSkinStartException {
   param(
     [Parameter(Mandatory = $true)][string]$Category,
@@ -699,7 +744,40 @@ function Get-DreamSkinValidatedNodeRuntime {
   return [pscustomobject]@{ Path = $runtimePath; Version = $version; Major = $major }
 }
 
+$script:DreamSkinNodeRuntimeCache = $null
+
 function Get-DreamSkinNodeRuntime {
+  param([int]$MinimumMajor = 22)
+
+  # One manager action resolves the runtime several times (metadata checks,
+  # video probes, live apply). Reuse the validated result within this process
+  # while the executable keeps the same path, size and timestamp; any change
+  # repeats the full Authenticode and identity validation below.
+  $cached = $script:DreamSkinNodeRuntimeCache
+  if ($null -ne $cached -and $cached.Runtime.Major -ge $MinimumMajor) {
+    try {
+      $current = Get-Item -LiteralPath $cached.Runtime.Path -ErrorAction Stop
+      if ($current.Length -eq $cached.Length -and $current.LastWriteTimeUtc -eq $cached.LastWriteTimeUtc) {
+        return $cached.Runtime
+      }
+    } catch {}
+    $script:DreamSkinNodeRuntimeCache = $null
+  }
+  $runtime = Resolve-DreamSkinNodeRuntime -MinimumMajor $MinimumMajor
+  try {
+    $item = Get-Item -LiteralPath $runtime.Path -ErrorAction Stop
+    $script:DreamSkinNodeRuntimeCache = [pscustomobject]@{
+      Runtime = $runtime
+      Length = $item.Length
+      LastWriteTimeUtc = $item.LastWriteTimeUtc
+    }
+  } catch {
+    $script:DreamSkinNodeRuntimeCache = $null
+  }
+  return $runtime
+}
+
+function Resolve-DreamSkinNodeRuntime {
   param([int]$MinimumMajor = 22)
 
   # The runtime that runs Safe CSS validation, theme-package validation, image
@@ -777,7 +855,19 @@ function Get-DreamSkinSupportedPackageNames {
   return @('OpenAI.Codex')
 }
 
+# Opt-in per process (start-dream-skin.ps1 enables it): one startup resolves
+# the registered packages three times, each Appx query costing about a second.
+# The short lifetime bounds staleness if a long-lived host ever enables it.
+$script:DreamSkinRegisteredCodexInstallsCacheEnabled = $false
+$script:DreamSkinRegisteredCodexInstallsCache = $null
+$script:DreamSkinRegisteredCodexInstallsCachedAt = [DateTime]::MinValue
+
 function Get-DreamSkinRegisteredCodexInstalls {
+  if ($script:DreamSkinRegisteredCodexInstallsCacheEnabled -and
+    $null -ne $script:DreamSkinRegisteredCodexInstallsCache -and
+    ([DateTime]::UtcNow - $script:DreamSkinRegisteredCodexInstallsCachedAt).TotalSeconds -lt 60) {
+    return @($script:DreamSkinRegisteredCodexInstallsCache)
+  }
   $packages = @()
   foreach ($packageName in @(Get-DreamSkinSupportedPackageNames)) {
     try {
@@ -796,6 +886,10 @@ function Get-DreamSkinRegisteredCodexInstalls {
   foreach ($package in $packages) {
     $install = ConvertTo-DreamSkinCodexInstall -Package $package
     if ($null -ne $install) { $installs += $install }
+  }
+  if ($script:DreamSkinRegisteredCodexInstallsCacheEnabled) {
+    $script:DreamSkinRegisteredCodexInstallsCache = @($installs)
+    $script:DreamSkinRegisteredCodexInstallsCachedAt = [DateTime]::UtcNow
   }
   return $installs
 }
@@ -1440,11 +1534,19 @@ function Stop-DreamSkinCodex {
   )
   $processes = Get-DreamSkinCodexProcessesExcept -Codex $Codex -PreserveProcessIds $PreserveProcessIds
   if ($processes.Count -eq 0) { return }
+  $closeRequested = $false
   foreach ($item in $processes) {
-    try { [void](Get-Process -Id $item.ProcessId -ErrorAction Stop).CloseMainWindow() } catch {}
+    try {
+      if ((Get-Process -Id $item.ProcessId -ErrorAction Stop).CloseMainWindow()) { $closeRequested = $true }
+    } catch {}
   }
 
-  $deadline = (Get-Date).AddSeconds(15)
+  # Without force authorization a manual close keeps its full 15 seconds. With
+  # restart consent, Codex keeps windowless processes (background instances,
+  # helpers) alive after its window closes, which used to cost the whole wait
+  # on every restart: give a visible window a short grace and force the rest.
+  $graceSeconds = if (-not $AllowForce) { 15 } elseif ($closeRequested) { 3 } else { 0 }
+  $deadline = (Get-Date).AddSeconds($graceSeconds)
   while ((Get-DreamSkinCodexProcessesExcept -Codex $Codex `
       -PreserveProcessIds $PreserveProcessIds).Count -gt 0 -and (Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds 250
@@ -1452,7 +1554,7 @@ function Stop-DreamSkinCodex {
   $remaining = Get-DreamSkinCodexProcessesExcept -Codex $Codex -PreserveProcessIds $PreserveProcessIds
   if ($remaining.Count -eq 0) { return }
   if (-not $AllowForce) {
-    throw 'Codex did not close within 15 seconds. Close it manually or explicitly authorize a forced restart.'
+    throw "Codex did not close within $graceSeconds seconds. Close it manually or explicitly authorize a forced restart."
   }
   foreach ($item in $remaining) {
     $current = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$item.ProcessId)" -ErrorAction SilentlyContinue
