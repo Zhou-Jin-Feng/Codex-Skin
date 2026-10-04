@@ -28,9 +28,9 @@
 | C2.3、C2.4 | 跳过重复媒体校验、常驻 PowerShell | 视后续计时再定 |
 | C4.2、C4.4 | 校验前激活窗口、条件等待 | 未开始 |
 | C4.3 | 记住通过的视频解码校验（同一 Chromium 构建、同一文件只校验一次） | 已随 C4.8 提交（`c1b82b2`），真机确认第二次校验直接命中；未连接时为校验多重启一次的问题仍在 |
-| C4.8 | Codex 窗口在后台时，视频校验改以解出首帧为准 | 已提交（`c1b82b2`），真机确认后台窗口下 0.7 秒通过（原来等满 7 秒后报 `decode-timeout`） |
+| C4.8 | Codex 窗口在后台时，视频校验改以解出首帧为准 | 已提交（`c1b82b2`），真机确认：后台窗口下校验 0.7 秒通过（原来等满 7 秒后报 `decode-timeout`）；Codex 最小化时从托盘热切换视频主题约 6.7 秒成功 |
 | C3.3 | 点通知、从开始菜单打开的 Codex 并入皮肤窗口 | 已提交，真机确认点通知不再另开无皮肤窗口 |
-| C3.6 | 皮肤 profile 共用默认 profile 的 Statsig 设备标识 | 已提交；10 月 4 日 23:26 通过管理器重启 Codex 时，日志显示两边设备标识已一致，界面与语言待用户确认 |
+| C3.6 | 皮肤 profile 共用默认 profile 的 Statsig 设备标识 | 已提交，真机确认：10 月 4 日 23:26 通过管理器重启后，Codex 为中文新版界面 |
 | C5.3 | 清除 26.930 对话页输入框后的底板和渐变（大黑框） | 已提交，真机确认效果 |
 | 第 3 阶段其余 | 连接保持健康（C3.1、C3.2、C3.4、C3.5） | 用户要求暂缓 |
 
@@ -268,6 +268,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\diag-runtime.ps1 -Mo
 - 现象：通过管理器重启的 Codex 是英文界面、看起来像旧版；皮肤校验第一次等满 30 秒失败（重启路线从约 44 秒变成 69 秒）；对话页出现大黑框。
 - 取证：只注册了一个 Codex 版本（26.930）；两份数据目录的浏览器版本和浏览器语言设置相同，但 Statsig 设备标识不同。默认 profile 位于 `%LOCALAPPDATA%\Packages\OpenAI.Codex_<id>\LocalCache\Roaming\Codex\web\Codex`，标识自 9 月 3 日沿用至今；皮肤 profile 于 10 月 3 日新建，生成了新标识，被分进另一组灰度实验。
 - 修复：每次以皮肤 profile 拉起 Codex 前（此时 Codex 已关闭），把默认 profile 的 `statsig-stable-id` 写入皮肤 profile 的 `statsig-state.json` 及其 `.bak`；首次覆盖前保留原文件为 `statsig-state.json.before-dreamskin-sync`。只复制这一个标识，不涉及登录与对话数据；任何失败都跳过并记计时点。
+- 真机确认（10 月 4 日 23:26）：通过管理器重启后 Codex 为中文新版界面；计时日志记下“statsig device id: already shared”，注入器启动后第一次皮肤校验即通过，没有再出现等满 30 秒失败。
 
 ### C3.4 `feat: 可选接管外部打开的 Codex`
 
@@ -360,7 +361,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\diag-runtime.ps1 -Mo
   - 窗口隐藏时，`readyState >= 2`、有宽高且解码帧计数大于 0 即通过（`decoded-frame-hidden`）；隐藏时 `play()` 被拒不算失败。
   - 隐藏时 7 秒仍没解出画面，报 `hidden-timeout`，提示先把 Codex 窗口显示出来再重试。
 - 真机：Codex 主窗口隐藏时运行 `validate-video-file.mjs`，银璃幻梦 0.7 秒通过（`decoded-frame-hidden`），第二次命中 C4.3 的缓存。
-- 用户实测（23:25）：通过管理器应用银璃幻梦成功，校验结果写入缓存；这是脚本更新后的第一次应用，按设计走了重启路线。“Codex 最小化时从托盘热切换视频主题”尚未在界面上实测。
+- 用户实测（23:25）：通过管理器应用银璃幻梦成功，校验结果写入缓存；这是脚本更新后的第一次应用，按设计走了重启路线。
+- 用户实测（23:41）：Codex 最小化时从托盘热切换，均未重启 Codex：
+  - 墨羽流光（首次，真实校验）总计 6.7 秒，其中写入主题 2.6 秒、实时应用 1.2 秒；
+  - 银璃幻梦（命中缓存）总计 6.6 秒，其中写入主题 2.4 秒、实时应用 0.9 秒。
+  - 视频主题的热切换仍高于图片主题的 3 秒目标。写入主题这一步（约 2.5 秒）要复制视频文件，并各起一次 node 做元数据校验和解码校验；命中缓存只省掉解码本身，细分耗时还没有单独计时（相关优化见 C2.3）。
 - 共享脚本经 `sync-runtime-assets` 同步到 macOS，macOS 的应用前校验同样受益；macOS 注入器未加缓存。
 
 ---
