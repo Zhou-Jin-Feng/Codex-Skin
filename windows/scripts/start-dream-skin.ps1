@@ -268,6 +268,10 @@ try {
         New-Item -ItemType Directory -Force -Path $ProfilePath | Out-Null
       }
       $arguments += "--user-data-dir=$ProfilePath"
+      # Codex is closed here, so the skin profile can safely adopt the normal
+      # profile's experiment identity before it starts.
+      $statsigSync = Sync-DreamSkinProfileStatsigIdentity -Codex $codex -ProfilePath $ProfilePath
+      Write-DreamSkinTimingMark -Stage "statsig device id: $statsigSync"
       $debugLaunchAttempted = $true
       $debugLaunchBaselineProcessIds = @(
         Get-DreamSkinCodexProcesses -Codex $codex | ForEach-Object { [int]$_.ProcessId }

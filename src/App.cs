@@ -3,6 +3,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 
 namespace CodexDreamSkinManager
@@ -50,10 +51,11 @@ namespace CodexDreamSkinManager
                 application.SessionEnding += delegate { window.PrepareForSessionEnd(); };
                 string executablePath = Assembly.GetEntryAssembly().Location;
                 string settingsPath = ManagerSettings.DefaultPath;
+                ManagerSettings settings = ManagerSettings.Load(settingsPath);
                 TrayHost trayHost = null;
                 try
                 {
-                    trayHost = new TrayHost(window, ManagerSettings.Load(settingsPath), settingsPath, executablePath);
+                    trayHost = new TrayHost(window, settings, settingsPath, executablePath);
                 }
                 catch (Exception ex)
                 {
@@ -63,6 +65,11 @@ namespace CodexDreamSkinManager
                     startInTray = false;
                     OperationTimingLog.Write("tray", "unavailable: " + ex.Message, 0);
                 }
+                // Started on a pool (MTA) thread so WMI event callbacks never
+                // need the UI thread; null when process events are unavailable.
+                CodexInstanceSentinel sentinel = Task.Run(() =>
+                    CodexInstanceSentinel.TryStart(() => settings.MergeExternalLaunches)).Result;
+                using (sentinel)
                 using (TrayHost tray = trayHost)
                 using (InstanceActivationListener listener = InstanceActivationListener.Start(ActivationEventName,
                     delegate { window.Dispatcher.BeginInvoke(new Action(window.ShowFromTray)); }))

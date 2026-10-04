@@ -16,6 +16,8 @@ namespace CodexDreamSkinManager
         private const int MaxRecentThemes = 5;
 
         public bool TrayHintShown;
+        // Fold Codex windows opened outside the skin into the skinned instance.
+        public bool MergeExternalLaunches = true;
         public List<string> RecentThemeIds = new List<string>();
 
         internal static string DefaultPath
@@ -34,6 +36,8 @@ namespace CodexDreamSkinManager
                 if (data == null) return settings;
                 object value;
                 if (data.TryGetValue("trayHintShown", out value) && value is bool) settings.TrayHintShown = (bool)value;
+                if (data.TryGetValue("mergeExternalLaunches", out value) && value is bool)
+                    settings.MergeExternalLaunches = (bool)value;
                 if (data.TryGetValue("recentThemeIds", out value) && value is IEnumerable && !(value is string))
                 {
                     foreach (object item in (IEnumerable)value)
@@ -62,6 +66,7 @@ namespace CodexDreamSkinManager
                 Directory.CreateDirectory(directory);
                 Dictionary<string, object> data = new Dictionary<string, object>();
                 data["trayHintShown"] = TrayHintShown;
+                data["mergeExternalLaunches"] = MergeExternalLaunches;
                 data["recentThemeIds"] = RecentThemeIds.ToArray();
                 string temporary = path + ".tmp";
                 File.WriteAllText(temporary, new JavaScriptSerializer().Serialize(data), new UTF8Encoding(false));
