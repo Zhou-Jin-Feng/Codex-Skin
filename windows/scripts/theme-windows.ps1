@@ -326,10 +326,13 @@ function Assert-DreamSkinImageFile {
 function Assert-DreamSkinVideoDecodable {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
-    [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'CodexDreamSkin')
+    [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'),
+    # The decode validator parses the MP4 itself; callers that already checked
+    # the same file's metadata skip the extra parse.
+    [switch]$SkipImageMetadata
   )
   if ([System.IO.Path]::GetExtension($Path) -ine '.mp4') { return }
-  Assert-DreamSkinImageFile -Path $Path
+  Assert-DreamSkinImageFile -Path $Path -SkipImageMetadata:$SkipImageMetadata
   $node = Get-DreamSkinNodeRuntime
   $stateFile = (Get-DreamSkinThemePaths -StateRoot $StateRoot).State
   $output = @(& $node.Path (Join-Path $PSScriptRoot 'validate-video-file.mjs') $Path $stateFile 2>&1)
@@ -649,6 +652,82 @@ function New-DreamSkinThemeImageName {
     [guid]::NewGuid().ToString('N').Substring(0, 8) + $Extension.ToLowerInvariant()
 }
 
+function Write-DreamSkinThemeTimingMark {
+  param([Parameter(Mandatory = $true)][string]$Stage)
+  # The theme store is also loaded without the shared timing helpers.
+  if (Get-Command Write-DreamSkinTimingMark -ErrorAction SilentlyContinue) {
+    Write-DreamSkinTimingMark -Stage $Stage
+  }
+}
+
+# Applying the same artwork again (switching back and forth between themes)
+# re-parsed identical bytes in node every time. A copied snapshot whose SHA-256
+# already passed the current metadata and decode validators skips that parse;
+# the cheap path, extension and size checks still run on every apply.
+$script:DreamSkinValidatedMediaLimit = 64
+
+function Get-DreamSkinMediaValidatorFingerprint {
+  $hasher = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    foreach ($name in @('image-metadata.mjs', 'video-decode-probe.mjs', 'validate-video-file.mjs')) {
+      $bytes = [System.IO.File]::ReadAllBytes((Join-Path $PSScriptRoot $name))
+      $null = $hasher.TransformBlock($bytes, 0, $bytes.Length, $null, 0)
+    }
+    $null = $hasher.TransformFinalBlock([byte[]]::new(0), 0, 0)
+    return ([System.BitConverter]::ToString($hasher.Hash) -replace '-', '').ToLowerInvariant()
+  } finally {
+    $hasher.Dispose()
+  }
+}
+
+function Get-DreamSkinValidatedMediaKey {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  try {
+    return (Get-DreamSkinFileSha256 -Path $Path) + ':' + (Get-DreamSkinMediaValidatorFingerprint)
+  } catch {
+    return $null
+  }
+}
+
+function Read-DreamSkinValidatedMediaRecords {
+  param([Parameter(Mandatory = $true)][string]$StateRoot)
+  try {
+    $recordPath = Join-Path $StateRoot 'validated-media-v1.json'
+    if (-not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { return @() }
+    $parsed = [System.IO.File]::ReadAllText($recordPath) | ConvertFrom-Json -ErrorAction Stop
+    if ("$($parsed.version)" -cne '1') { return @() }
+    return @($parsed.entries | Where-Object { $_ -and "$($_.key)" -cmatch '^[0-9a-f]{64}:[0-9a-f]{64}$' })
+  } catch {
+    return @()
+  }
+}
+
+function Save-DreamSkinValidatedMediaRecord {
+  param(
+    [Parameter(Mandatory = $true)][string]$StateRoot,
+    [AllowEmptyString()][string]$Key,
+    [AllowEmptyString()][string]$DecodeBrowserId
+  )
+  try {
+    if (-not $Key -or -not (Get-Command Write-DreamSkinUtf8FileAtomically -ErrorAction SilentlyContinue)) { return }
+    $recordPath = Join-Path $StateRoot 'validated-media-v1.json'
+    Assert-DreamSkinNoReparseComponents -Path $recordPath
+    $others = @(Read-DreamSkinValidatedMediaRecords -StateRoot $StateRoot | Where-Object { "$($_.key)" -cne $Key })
+    $entry = [pscustomobject][ordered]@{
+      key = $Key
+      decodeBrowserId = $DecodeBrowserId
+      validatedAt = [DateTime]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    $records = [ordered]@{
+      version = 1
+      entries = @((@($entry) + $others) | Select-Object -First $script:DreamSkinValidatedMediaLimit)
+    }
+    Write-DreamSkinUtf8FileAtomically -Path $recordPath -Content ($records | ConvertTo-Json -Depth 4)
+  } catch {
+    # Not remembering a passed check only costs the next apply a full parse.
+  }
+}
+
 function Set-DreamSkinActiveTheme {
   param(
     [Parameter(Mandatory = $true)][string]$ImagePath,
@@ -695,8 +774,28 @@ function Set-DreamSkinActiveTheme {
     Assert-DreamSkinNoReparseComponents -Path $temporary
     Copy-Item -LiteralPath $source -Destination $temporary -Force
     Assert-DreamSkinNoReparseComponents -Path $temporary
-    Assert-DreamSkinImageFile -Path $temporary
-    Assert-DreamSkinVideoDecodable -Path $temporary -StateRoot $StateRoot
+    Write-DreamSkinThemeTimingMark -Stage 'media copied'
+    $mediaKey = Get-DreamSkinValidatedMediaKey -Path $temporary
+    $mediaRecord = $null
+    if ($mediaKey) {
+      $mediaRecord = @(Read-DreamSkinValidatedMediaRecords -StateRoot $StateRoot |
+        Where-Object { "$($_.key)" -ceq $mediaKey }) | Select-Object -First 1
+    }
+    Assert-DreamSkinImageFile -Path $temporary -SkipImageMetadata:($null -ne $mediaRecord)
+    Write-DreamSkinThemeTimingMark -Stage 'media metadata checked'
+    $decodeBrowserId = ''
+    if ($extension -eq '.mp4') {
+      # Decode support belongs to one running Codex browser; a new launch is
+      # checked again (its own decode cache keeps that check short).
+      $browserId = ''
+      try { $browserId = "$((Read-DreamSkinState -Path $paths.State).browserId)".Trim() } catch {}
+      if ($null -eq $mediaRecord -or -not $browserId -or "$($mediaRecord.decodeBrowserId)" -cne $browserId) {
+        Assert-DreamSkinVideoDecodable -Path $temporary -StateRoot $StateRoot -SkipImageMetadata
+      }
+      $decodeBrowserId = $browserId
+    }
+    Write-DreamSkinThemeTimingMark -Stage 'video decode checked'
+    Save-DreamSkinValidatedMediaRecord -StateRoot $StateRoot -Key $mediaKey -DecodeBrowserId $decodeBrowserId
     Move-Item -LiteralPath $temporary -Destination $target -Force
     Assert-DreamSkinNoReparseComponents -Path $target
     Assert-DreamSkinImageFile -Path $target -SkipImageMetadata
@@ -713,6 +812,7 @@ function Set-DreamSkinActiveTheme {
       Remove-Item -LiteralPath $activeCss -Force -ErrorAction SilentlyContinue
     }
     Write-DreamSkinTheme -ThemeDirectory $paths.Active -Theme $Theme
+    Write-DreamSkinThemeTimingMark -Stage 'active theme files written'
   } finally {
     Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     if ($temporaryCss) { Remove-Item -LiteralPath $temporaryCss -Force -ErrorAction SilentlyContinue }
@@ -727,7 +827,10 @@ function Set-DreamSkinActiveTheme {
     Assert-DreamSkinNoReparseComponents -Path $imageArchive
     Copy-Item -LiteralPath $target -Destination $imageArchive -Force
     Assert-DreamSkinNoReparseComponents -Path $imageArchive
-    Assert-DreamSkinImageFile -Path $imageArchive
+    # A byte copy of the target validated above; reapplying an archived image
+    # validates its own fresh snapshot again.
+    Assert-DreamSkinImageFile -Path $imageArchive -SkipImageMetadata
+    Write-DreamSkinThemeTimingMark -Stage 'image archived'
   }
   return Read-DreamSkinTheme -ThemeDirectory $paths.Active -SkipImageMetadata
 }

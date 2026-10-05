@@ -746,6 +746,103 @@ function Get-DreamSkinValidatedNodeRuntime {
 
 $script:DreamSkinNodeRuntimeCache = $null
 
+# Validating the bundled runtime (Authenticode plus two identity probes) costs
+# about a second, and every manager action runs in a new PowerShell process.
+# A full validation of the bundled node.exe is therefore remembered by the
+# SHA-256 of its bytes for a day; a changed file never matches and is validated
+# again. The PATH fallback is never remembered: PATH can be redirected without
+# touching the engine folder, so it keeps the full validation in every process.
+$script:DreamSkinNodeRuntimeRecordPath = Join-Path `
+  ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexDreamSkinManager\node-runtime-v1.json'
+$script:DreamSkinNodeRuntimeRecordMaxAge = [TimeSpan]::FromHours(24)
+
+function Get-DreamSkinFileSha256 {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return ([System.BitConverter]::ToString($hasher.ComputeHash($stream)) -replace '-', '').ToLowerInvariant()
+    } finally {
+      $hasher.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
+function Read-DreamSkinNodeRuntimeRecords {
+  try {
+    $recordPath = $script:DreamSkinNodeRuntimeRecordPath
+    if (-not $recordPath -or -not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { return @() }
+    $parsed = [System.IO.File]::ReadAllText($recordPath) | ConvertFrom-Json -ErrorAction Stop
+    if ("$($parsed.version)" -cne '1') { return @() }
+    return @($parsed.entries | Where-Object { $_ -and "$($_.path)" -and "$($_.sha256)" -cmatch '^[0-9a-f]{64}$' })
+  } catch {
+    return @()
+  }
+}
+
+function Get-DreamSkinRememberedNodeRuntime {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Sha256,
+    [int]$MinimumMajor = 22
+  )
+  foreach ($entry in Read-DreamSkinNodeRuntimeRecords) {
+    if (-not (Test-DreamSkinPathEqual -Left "$($entry.path)" -Right $Path) -or "$($entry.sha256)" -cne $Sha256) {
+      continue
+    }
+    # PowerShell 7 turns ISO strings into dates; Windows PowerShell keeps text.
+    $validatedAt = [DateTime]::MinValue
+    if ($entry.validatedAt -is [DateTime]) {
+      $validatedAt = $entry.validatedAt.ToUniversalTime()
+    } elseif (-not [DateTime]::TryParse("$($entry.validatedAt)", [System.Globalization.CultureInfo]::InvariantCulture,
+      ([System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal),
+      [ref]$validatedAt)) {
+      return $null
+    }
+    $age = [DateTime]::UtcNow - $validatedAt
+    if ($age -lt [TimeSpan]::Zero -or $age -gt $script:DreamSkinNodeRuntimeRecordMaxAge) { return $null }
+    $major = 0
+    if (-not [int]::TryParse("$($entry.major)", [ref]$major) -or $major -lt $MinimumMajor) { return $null }
+    if (-not (Test-DreamSkinPathEqual -Left "$($entry.runtimePath)" -Right $Path)) { return $null }
+    return [pscustomobject]@{ Path = "$($entry.runtimePath)"; Version = "$($entry.version)"; Major = $major }
+  }
+  return $null
+}
+
+function Save-DreamSkinNodeRuntimeRecord {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Sha256,
+    [Parameter(Mandatory = $true)][object]$Runtime
+  )
+  try {
+    # Only a runtime that resolved to the bundled executable itself is remembered.
+    if (-not (Test-DreamSkinPathEqual -Left "$($Runtime.Path)" -Right $Path)) { return }
+    $others = @(Read-DreamSkinNodeRuntimeRecords |
+      Where-Object { -not (Test-DreamSkinPathEqual -Left "$($_.path)" -Right $Path) })
+    $entry = [pscustomobject][ordered]@{
+      path = $Path
+      sha256 = $Sha256
+      runtimePath = "$($Runtime.Path)"
+      version = "$($Runtime.Version)"
+      major = [int]$Runtime.Major
+      validatedAt = [DateTime]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    $records = [ordered]@{ version = 1; entries = @((@($entry) + $others) | Select-Object -First 8) }
+    $directory = Split-Path -Parent $script:DreamSkinNodeRuntimeRecordPath
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+      New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    Write-DreamSkinUtf8FileAtomically -Path $script:DreamSkinNodeRuntimeRecordPath `
+      -Content ($records | ConvertTo-Json -Depth 4)
+  } catch {
+    # A missing record only costs the next process a full validation.
+  }
+}
+
 function Get-DreamSkinNodeRuntime {
   param([int]$MinimumMajor = 22)
 
@@ -795,7 +892,21 @@ function Resolve-DreamSkinNodeRuntime {
   $runtimeRoot = Split-Path -Parent $PSScriptRoot
   $bundledNode = Join-Path $runtimeRoot 'runtime\node\node.exe'
   if (Test-Path -LiteralPath $bundledNode -PathType Leaf) {
-    return Get-DreamSkinValidatedNodeRuntime -Path $bundledNode -MinimumMajor $MinimumMajor
+    $bundledNode = [System.IO.Path]::GetFullPath($bundledNode)
+    $digest = $null
+    try { $digest = Get-DreamSkinFileSha256 -Path $bundledNode } catch {}
+    if ($digest) {
+      $remembered = Get-DreamSkinRememberedNodeRuntime -Path $bundledNode -Sha256 $digest -MinimumMajor $MinimumMajor
+      if ($null -ne $remembered) { return $remembered }
+    }
+    $runtime = Get-DreamSkinValidatedNodeRuntime -Path $bundledNode -MinimumMajor $MinimumMajor
+    # Remember the validation only if the bytes did not change while it ran.
+    $after = $null
+    if ($digest) { try { $after = Get-DreamSkinFileSha256 -Path $bundledNode } catch {} }
+    if ($digest -and $after -ceq $digest) {
+      Save-DreamSkinNodeRuntimeRecord -Path $bundledNode -Sha256 $digest -Runtime $runtime
+    }
+    return $runtime
   }
 
   $command = Get-Command node.exe -ErrorAction SilentlyContinue
