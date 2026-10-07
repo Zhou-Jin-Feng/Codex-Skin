@@ -1776,6 +1776,38 @@ namespace CodexDreamSkinManager
                 AssertEqual("已保存主题", cleaned);
             });
 
+            Run("Live session probe treats a closed debugging port as unreachable before verifying", delegate
+            {
+                AssertTrue(LiveSessionProbe.Classify(false,
+                    delegate { throw new InvalidOperationException("A closed port must not be verified."); }) ==
+                    LiveSessionState.BrowserUnreachable);
+                AssertTrue(LiveSessionProbe.Classify(true, delegate { return true; }) == LiveSessionState.Healthy);
+                AssertTrue(LiveSessionProbe.Classify(true, delegate { return false; }) == LiveSessionState.Unknown);
+
+                string root = Path.Combine(Path.GetTempPath(), "dream-skin-probe-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    Directory.CreateDirectory(Path.Combine(root, "scripts"));
+                    Directory.CreateDirectory(Path.Combine(root, "assets"));
+                    File.WriteAllText(Path.Combine(root, "scripts", "injector.mjs"), "// fixture");
+                    File.WriteAllText(Path.Combine(root, "assets", "renderer-inject.js"), "// fixture");
+                    File.WriteAllText(Path.Combine(root, "assets", "dream-skin.css"), "/* fixture */");
+                    // A loopback port released a moment ago has no listener.
+                    System.Net.Sockets.TcpListener released = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+                    released.Start();
+                    int port = ((System.Net.IPEndPoint)released.LocalEndpoint).Port;
+                    released.Stop();
+                    string statePath = Path.Combine(root, "state.json");
+                    File.WriteAllText(statePath, "{\"port\":" + port + ",\"injectorPid\":" + Process.GetCurrentProcess().Id +
+                        ",\"browserId\":\"browser-a\",\"injectorStartedAt\":\"2026-01-01T00:00:00Z\"}");
+                    AssertTrue(LiveSessionProbe.Probe(statePath, root).State == LiveSessionState.BrowserUnreachable);
+                }
+                finally
+                {
+                    try { Directory.Delete(root, true); } catch { }
+                }
+            });
+
             return ReportResults();
         }
 

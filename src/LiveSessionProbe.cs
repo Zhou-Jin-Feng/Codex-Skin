@@ -77,20 +77,25 @@ namespace CodexDreamSkinManager
                 int port = state == null ? 0 : ReadInt(state, "port");
                 if (port < 1024 || port > 65535) port = DefaultPort;
                 report.CodexRunning = DetectCodexRunning();
-                if (state != null && IsVerifiedSession(state, port, skillRoot))
-                {
-                    report.State = LiveSessionState.Healthy;
-                    return report;
-                }
-                // Any listener, even an unverified one, is left for the startup
-                // script to judge: it may be a restarted skinned Codex.
-                if (!IsPortListening(port)) report.State = LiveSessionState.BrowserUnreachable;
+                report.State = Classify(IsPortListening(port),
+                    delegate { return state != null && IsVerifiedSession(state, port, skillRoot); });
             }
             catch
             {
                 report.State = LiveSessionState.Unknown;
             }
             return report;
+        }
+
+        // A closed port is conclusive on its own, so it is checked first: a
+        // still-running injector used to send the session check to a port nobody
+        // listens on, where the connection attempt throws and left the report
+        // Unknown. Any listener, even an unverified one, is left for the startup
+        // script to judge: it may be a restarted skinned Codex.
+        internal static LiveSessionState Classify(bool portListening, Func<bool> verifiedSession)
+        {
+            if (!portListening) return LiveSessionState.BrowserUnreachable;
+            return verifiedSession() ? LiveSessionState.Healthy : LiveSessionState.Unknown;
         }
 
         private static bool IsVerifiedSession(Dictionary<string, object> state, int port, string skillRoot)
