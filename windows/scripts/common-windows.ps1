@@ -1391,28 +1391,188 @@ function Get-DreamSkinCdpBrowserIdentity {
   }
 }
 
+$script:DreamSkinListenerLookupUnavailable = $false
+
+# Get-NetTCPConnection and Win32_Process walk every connection or process
+# through CIM: with about a thousand TCP connections one listener query takes
+# ~3 seconds and one process query ~1 second, and every endpoint identity check
+# needs two of each. The owner-PID listener tables and a limited process query
+# answer in milliseconds; the CIM queries remain the fallback and the final word
+# whenever the fast answer is not a positive match.
+function Initialize-DreamSkinListenerLookup {
+  if ($script:DreamSkinListenerLookupUnavailable) { return $false }
+  if ('CodexDreamSkin.LoopbackListenerTable' -as [type]) { return $true }
+  try {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Net;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace CodexDreamSkin {
+  public sealed class TcpListenerEntry {
+    public string LocalAddress { get; private set; }
+    public int LocalPort { get; private set; }
+    public int OwningProcess { get; private set; }
+
+    internal TcpListenerEntry(string localAddress, int localPort, int owningProcess) {
+      LocalAddress = localAddress;
+      LocalPort = localPort;
+      OwningProcess = owningProcess;
+    }
+  }
+
+  public static class LoopbackListenerTable {
+    private const int AfInet = 2;
+    private const int AfInet6 = 23;
+    private const int TcpTableOwnerPidListener = 3;
+    private const uint ErrorNotSupported = 50;
+    private const uint ErrorInsufficientBuffer = 122;
+    private const int ProcessQueryLimitedInformation = 0x1000;
+    private const uint StillActive = 259;
+
+    [DllImport("iphlpapi.dll")]
+    private static extern uint GetExtendedTcpTable(IntPtr table, ref int size, bool order,
+      int family, int tableClass, uint reserved);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(int access, bool inheritHandle, int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool QueryFullProcessImageName(IntPtr process, int flags,
+      StringBuilder name, ref int size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    // Every listening row for a port, as Get-NetTCPConnection -State Listen
+    // reports them, except that a dual-stack socket also appears in the IPv4
+    // table as 0.0.0.0 next to its "::" row. Both rows are rejected as
+    // non-loopback, so no availability or ownership decision changes.
+    public static TcpListenerEntry[] Find(int port) {
+      List<TcpListenerEntry> result = new List<TcpListenerEntry>();
+      Collect(AfInet, 24, port, result);
+      Collect(AfInet6, 56, port, result);
+      return result.ToArray();
+    }
+
+    private static void Collect(int family, int rowSize, int port, List<TcpListenerEntry> result) {
+      int size = 0;
+      IntPtr buffer = IntPtr.Zero;
+      try {
+        uint status = ErrorInsufficientBuffer;
+        // The table can grow between the size query and the read.
+        for (int attempt = 0; attempt < 8 && status == ErrorInsufficientBuffer; attempt++) {
+          if (buffer != IntPtr.Zero) { Marshal.FreeHGlobal(buffer); buffer = IntPtr.Zero; }
+          if (size > 0) buffer = Marshal.AllocHGlobal(size);
+          status = GetExtendedTcpTable(buffer, ref size, false, family, TcpTableOwnerPidListener, 0);
+        }
+        if (status == ErrorNotSupported && family == AfInet6) return;
+        if (status != 0) throw new Win32Exception((int)status);
+        if (buffer == IntPtr.Zero) return;
+        int count = Marshal.ReadInt32(buffer);
+        if (count < 0 || 4L + (long)count * rowSize > size) {
+          throw new InvalidOperationException("The TCP listener table is malformed.");
+        }
+        int portOffset = family == AfInet ? 8 : 20;
+        int processOffset = family == AfInet ? 20 : 52;
+        for (int index = 0; index < count; index++) {
+          IntPtr row = IntPtr.Add(buffer, 4 + index * rowSize);
+          // The port is stored in network byte order.
+          int localPort = (Marshal.ReadByte(row, portOffset) << 8) | Marshal.ReadByte(row, portOffset + 1);
+          if (localPort != port) continue;
+          string address;
+          if (family == AfInet) {
+            address = new IPAddress((long)(uint)Marshal.ReadInt32(row, 4)).ToString();
+          } else {
+            // The scope id is left out: it never makes a loopback row less local.
+            byte[] bytes = new byte[16];
+            Marshal.Copy(row, bytes, 0, 16);
+            address = new IPAddress(bytes).ToString();
+          }
+          result.Add(new TcpListenerEntry(address, localPort, Marshal.ReadInt32(row, processOffset)));
+        }
+      } finally {
+        if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+      }
+    }
+
+    // The final image path (junctions and file system redirection resolved).
+    // Null when the process has exited, even if a handle keeps its object
+    // alive, or when the limited query right is denied.
+    public static string ProcessImagePath(int processId) {
+      if (processId <= 0) return null;
+      IntPtr handle = OpenProcess(ProcessQueryLimitedInformation, false, processId);
+      if (handle == IntPtr.Zero) return null;
+      try {
+        uint exitCode;
+        if (!GetExitCodeProcess(handle, out exitCode) || exitCode != StillActive) return null;
+        StringBuilder name = new StringBuilder(32768);
+        int size = name.Capacity;
+        return QueryFullProcessImageName(handle, 0, name, ref size) ? name.ToString(0, size) : null;
+      } finally {
+        CloseHandle(handle);
+      }
+    }
+  }
+}
+'@
+    return $true
+  } catch {
+    # Compilation can be unavailable (for example under a language-mode
+    # policy); the CIM queries below stay correct, only slower.
+    $script:DreamSkinListenerLookupUnavailable = $true
+    return $false
+  }
+}
+
 function Get-DreamSkinPortListeners {
   param([int]$Port)
+  if (Initialize-DreamSkinListenerLookup) {
+    try {
+      return @([CodexDreamSkin.LoopbackListenerTable]::Find($Port))
+    } catch {}
+  }
   if (-not (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
     throw 'Get-NetTCPConnection is required to verify CDP listener ownership.'
   }
   return @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
 }
 
+function Test-DreamSkinListenerProcess {
+  param([int]$ProcessId, [string]$Executable)
+  if (Initialize-DreamSkinListenerLookup) {
+    try {
+      $finalPath = [CodexDreamSkin.LoopbackListenerTable]::ProcessImagePath($ProcessId)
+      if ($finalPath -and (Test-DreamSkinPathEqual -Left $finalPath -Right $Executable)) { return $true }
+    } catch {}
+  }
+  # Only a match is conclusive above. The final path differs from the launch
+  # path when the install sits behind a junction, and WMI can read paths the
+  # limited query right cannot, so anything else is decided by Win32_Process
+  # exactly as before.
+  $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+  $processPath = if ($process) { Get-DreamSkinProcessExecutablePath -ProcessInfo $process } else { $null }
+  return [bool]($processPath -and (Test-DreamSkinPathEqual -Left $processPath -Right $Executable))
+}
+
 function Test-DreamSkinPortAvailable {
   param([int]$Port)
-  return (Get-DreamSkinPortListeners -Port $Port).Count -eq 0
+  return @(Get-DreamSkinPortListeners -Port $Port).Count -eq 0
 }
 
 function Test-DreamSkinCodexPortOwner {
   param([int]$Port, [Parameter(Mandatory = $true)][object]$Codex)
-  $listeners = Get-DreamSkinPortListeners -Port $Port
+  $listeners = @(Get-DreamSkinPortListeners -Port $Port)
   if ($listeners.Count -eq 0) { return $false }
   foreach ($listener in $listeners) {
     if ($listener.LocalAddress -notin @('127.0.0.1', '::1')) { return $false }
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$listener.OwningProcess)" -ErrorAction SilentlyContinue
-    $processPath = if ($process) { Get-DreamSkinProcessExecutablePath -ProcessInfo $process } else { $null }
-    if (-not $processPath -or -not (Test-DreamSkinPathEqual -Left $processPath -Right $Codex.Executable)) {
+    if (-not (Test-DreamSkinListenerProcess -ProcessId ([int]$listener.OwningProcess) -Executable "$($Codex.Executable)")) {
       return $false
     }
   }
