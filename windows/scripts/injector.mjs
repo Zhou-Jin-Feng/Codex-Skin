@@ -198,6 +198,7 @@ function parseArgs(argv) {
     operationUiState: null,
     operationMessage: null,
     operationToken: null,
+    acceptHidden: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -221,6 +222,7 @@ function parseArgs(argv) {
     else if (arg === "--operation-message") options.operationMessage = argv[++i];
     else if (arg === "--operation-token") options.operationToken = argv[++i];
     else if (arg === "--reload") options.reload = true;
+    else if (arg === "--accept-hidden") options.acceptHidden = true;
     else if (arg === "--self-test") options.mode = "self-test";
     else if (arg === "--check-payload") options.mode = "check-payload";
     else throw new Error(`Unknown argument: ${arg}`);
@@ -1764,31 +1766,60 @@ export async function verifySession(
         result.suggestionLabelColorsMatch
       ))
     );
-    result.pass = result.installed && result.version === result.expectedVersion &&
+    // Everything the renderer can confirm without painting: the skin is
+    // installed and laid out. Layout keeps working while the window is
+    // minimized or covered by another full-screen window; only the document
+    // visibility is missing then.
+    const contentPass = result.installed && result.version === result.expectedVersion &&
       result.stylePresent && result.businessClassPollution === 0 && !result.documentOverflow.x &&
-      windowPass && documentPass && viewportPass && structurePass &&
-      payloadPass && homePass;
+      viewportPass && structurePass && payloadPass && homePass;
+    result.pass = contentPass && windowPass && documentPass;
+    // Only a page that belongs to a real window can become visible later:
+    // either the window binding resolved, or this Codex build never exposes it.
+    const realWindow = result.nativeWindow?.bound === true || fallbackWindowPass;
+    result.pendingVisibility = contentPass && !documentPass && realWindow;
     return result;
   })()`);
 }
 
-async function waitForVerifiedSession(
+// How long a complete but hidden renderer must stay that way before a
+// startup that accepts it stops waiting for the window to be shown.
+const ACCEPT_HIDDEN_AFTER_MS = 3000;
+
+export async function waitForVerifiedSession(
   session,
   targetId,
   timeoutMs,
   expectedThemeId = null,
   expectedRevision = null,
+  acceptHiddenAfterMs = 0,
 ) {
   const deadline = Date.now() + remainingOperationTime(timeoutMs);
   let lastResult;
   let lastError;
+  let hiddenSince = null;
   while (Date.now() < deadline) {
     try {
       lastResult = await verifySession(session, targetId, expectedThemeId, expectedRevision);
       lastError = null;
       if (lastResult.pass) return lastResult;
+      // A window the user left in the background cannot become visible by
+      // waiting longer: once the complete skin has stayed hidden for a moment,
+      // report it instead of spending the whole budget.
+      if (acceptHiddenAfterMs > 0 && lastResult.pendingVisibility) {
+        hiddenSince ??= Date.now();
+        if (Date.now() - hiddenSince >= acceptHiddenAfterMs) {
+          // Only a hidden state that lasted the whole settle time may be
+          // accepted; a single hidden sample at the deadline is not enough.
+          lastResult.hiddenSettled = true;
+          return lastResult;
+        }
+      } else {
+        hiddenSince = null;
+      }
     } catch (error) {
       lastError = error;
+      hiddenSince = null;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
@@ -1948,11 +1979,14 @@ async function runOneShot(options) {
               options.timeoutMs,
               loadedPayload?.theme.id ?? null,
               loadedPayload?.revision ?? null,
+              options.acceptHidden ? ACCEPT_HIDDEN_AFTER_MS : 0,
             )
             : await verifySession(session, target.id);
         results.push({ targetId: target.id, markers: probe.markers, result: verified });
         if (operationToken) {
-          const passed = removedMode ? verified === true : verified?.pass;
+          const passed = removedMode
+            ? verified === true
+            : Boolean(verified?.pass || (options.acceptHidden && verified?.hiddenSettled));
           await presentOperationUi(
             session,
             operationToken,
@@ -1989,10 +2023,21 @@ async function runOneShot(options) {
   // Flush the result before marking logical completion; a socket that closes
   // late must not turn an already reported success into a timeout or truncate it.
   writeSync(1, JSON.stringify({ mode: options.mode, port: options.port, targets: results }, null, 2) + "\n");
-  const removedMode = options.mode === "remove" || options.mode === "verify-removed";
+  const exitCode = oneShotExitCode(results, options);
+  if (exitCode !== 0) process.exitCode = exitCode;
+}
+
+// 0 when every target verified; 4 when every target either verified or kept a
+// complete skin hidden for the whole settle time (only for callers that asked
+// for it); 2 otherwise.
+export function oneShotExitCode(results, { mode, acceptHidden = false } = {}) {
+  const removedMode = mode === "remove" || mode === "verify-removed";
   const failed = results.length === 0 || results.some((item) =>
     item.error || (removedMode ? item.result !== true : !item.result?.pass));
-  if (failed) process.exitCode = 2;
+  if (!failed) return 0;
+  const pendingVisibility = acceptHidden && !removedMode && results.length > 0 &&
+    results.every((item) => !item.error && (item.result?.pass || item.result?.hiddenSettled === true));
+  return pendingVisibility ? 4 : 2;
 }
 
 async function runWatch(options) {

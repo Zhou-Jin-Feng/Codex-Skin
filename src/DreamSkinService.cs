@@ -517,13 +517,16 @@ namespace CodexDreamSkinManager
             };
         }
 
-        public Task ApplyThemeAndRecoverAsync(ThemeOption theme)
+        // The recovery script runs the start script in its own process, so the
+        // pending-visibility line reaches this output as well.
+        public async Task<bool> ApplyThemeAndRecoverAsync(ThemeOption theme)
         {
             if (!CanRecover) throw new FileNotFoundException("缺少主题恢复脚本。", recoveryScript);
             List<ScriptArgument> args = new List<ScriptArgument>();
             args.Add(P("-SkillRoot")); args.Add(V(Path.Combine(rootDirectory, "windows")));
             AddThemeArguments(args, theme);
-            return RunScriptAsync(recoveryScript, args);
+            ScriptResult result = await RunScriptAsync(recoveryScript, args);
+            return ReportsPendingVisibility(result.Output);
         }
 
         private static void AddThemeArguments(List<ScriptArgument> args, ThemeOption theme)
@@ -620,11 +623,22 @@ namespace CodexDreamSkinManager
                 P("-SkillRoot"), V(Path.Combine(rootDirectory, "windows")) });
         }
 
-        public Task StartAsync(bool restartExisting)
+        // True when the skin is applied but the Codex window was not visible to
+        // confirm it (minimized, or covered by a full-screen program).
+        public async Task<bool> StartAsync(bool restartExisting)
         {
             List<ScriptArgument> args = new List<ScriptArgument>();
             if (restartExisting) args.Add(P("-RestartExisting"));
-            return RunScriptAsync(Path.Combine(scriptsDirectory, "start-dream-skin.ps1"), args);
+            ScriptResult result = await RunScriptAsync(Path.Combine(scriptsDirectory, "start-dream-skin.ps1"), args);
+            return ReportsPendingVisibility(result.Output);
+        }
+
+        internal static bool ReportsPendingVisibility(string output)
+        {
+            if (string.IsNullOrEmpty(output)) return false;
+            foreach (string line in output.Split('\n'))
+                if (line.Trim().StartsWith("DREAM_SKIN_PENDING_VISIBILITY:", StringComparison.Ordinal)) return true;
+            return false;
         }
 
         public Task CheckStartupAsync()
@@ -663,11 +677,11 @@ namespace CodexDreamSkinManager
             await PowerShellRunner.RunAsync(managerScript, args, OperationTimeoutMilliseconds);
         }
 
-        private async Task RunScriptAsync(string script, IList<ScriptArgument> args)
+        private Task<ScriptResult> RunScriptAsync(string script, IList<ScriptArgument> args)
         {
             // Recovery can stop Codex, reconnect, then run the bounded startup
             // verification. Its outer budget must include those serial phases.
-            await PowerShellRunner.RunAsync(script, args, OperationTimeoutMilliseconds);
+            return PowerShellRunner.RunAsync(script, args, OperationTimeoutMilliseconds);
         }
 
         private void EnsureManagerAvailable()

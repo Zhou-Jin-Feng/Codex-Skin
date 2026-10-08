@@ -303,7 +303,7 @@ function Get-DiagLogSummary {
     themeRejected = 'theme update rejected'
   }
   $summary = [ordered]@{}
-  foreach ($name in @('injector.log', 'injector-error.log')) {
+  foreach ($name in @('injector.log', 'injector-error.log', 'verify-failures.log')) {
     $path = Join-Path $StateRoot $name
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
       $summary[$name] = [ordered]@{ present = $false }
@@ -345,6 +345,10 @@ function Write-DiagLogSummary {
     if ($name -eq 'injector-error.log' -and @($entry.tail).Count) {
       Write-Host '    最近错误：'
       foreach ($line in @($entry.tail | Select-Object -Last 10)) { Write-Host "      $line" }
+    }
+    if ($name -eq 'verify-failures.log' -and @($entry.tail).Count) {
+      Write-Host '    最近失败的皮肤校验：'
+      foreach ($line in @($entry.tail | Where-Object { $_ -like '=== *' } | Select-Object -Last 5)) { Write-Host "      $line" }
     }
   }
 }

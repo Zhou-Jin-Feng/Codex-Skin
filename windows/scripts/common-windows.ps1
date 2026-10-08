@@ -1391,7 +1391,7 @@ function Get-DreamSkinCdpBrowserIdentity {
   }
 }
 
-$script:DreamSkinListenerLookupUnavailable = $false
+$script:DreamSkinNativeHelpersUnavailable = $false
 
 # Get-NetTCPConnection and Win32_Process walk every connection or process
 # through CIM: with about a thousand TCP connections one listener query takes
@@ -1399,8 +1399,8 @@ $script:DreamSkinListenerLookupUnavailable = $false
 # needs two of each. The owner-PID listener tables and a limited process query
 # answer in milliseconds; the CIM queries remain the fallback and the final word
 # whenever the fast answer is not a positive match.
-function Initialize-DreamSkinListenerLookup {
-  if ($script:DreamSkinListenerLookupUnavailable) { return $false }
+function Initialize-DreamSkinNativeHelpers {
+  if ($script:DreamSkinNativeHelpersUnavailable) { return $false }
   if ('CodexDreamSkin.LoopbackListenerTable' -as [type]) { return $true }
   try {
     Add-Type -ErrorAction Stop -TypeDefinition @'
@@ -1520,20 +1520,37 @@ namespace CodexDreamSkin {
       }
     }
   }
+
+  public static class ForegroundWindow {
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
+    // 0 when no window has the foreground.
+    public static int ProcessId() {
+      IntPtr window = GetForegroundWindow();
+      if (window == IntPtr.Zero) return 0;
+      uint processId;
+      if (GetWindowThreadProcessId(window, out processId) == 0) return 0;
+      return (int)processId;
+    }
+  }
 }
 '@
     return $true
   } catch {
     # Compilation can be unavailable (for example under a language-mode
     # policy); the CIM queries below stay correct, only slower.
-    $script:DreamSkinListenerLookupUnavailable = $true
+    $script:DreamSkinNativeHelpersUnavailable = $true
     return $false
   }
 }
 
 function Get-DreamSkinPortListeners {
   param([int]$Port)
-  if (Initialize-DreamSkinListenerLookup) {
+  if (Initialize-DreamSkinNativeHelpers) {
     try {
       return @([CodexDreamSkin.LoopbackListenerTable]::Find($Port))
     } catch {}
@@ -1546,7 +1563,7 @@ function Get-DreamSkinPortListeners {
 
 function Test-DreamSkinListenerProcess {
   param([int]$ProcessId, [string]$Executable)
-  if (Initialize-DreamSkinListenerLookup) {
+  if (Initialize-DreamSkinNativeHelpers) {
     try {
       $finalPath = [CodexDreamSkin.LoopbackListenerTable]::ProcessImagePath($ProcessId)
       if ($finalPath -and (Test-DreamSkinPathEqual -Left $finalPath -Right $Executable)) { return $true }
@@ -1908,4 +1925,19 @@ function Invoke-DreamSkinCodexWindowActivation {
     } catch {}
   }
   return $false
+}
+
+# Codex may be pulled forward only while the user is looking at Dream Skin
+# itself: the manager (its window, dialogs or tray menu) or this script's own
+# prompt, never a game or another program the user switched to while waiting.
+function Test-DreamSkinCodexActivationAllowed {
+  if (-not (Initialize-DreamSkinNativeHelpers)) { return $false }
+  try {
+    $foregroundId = [CodexDreamSkin.ForegroundWindow]::ProcessId()
+    if ($foregroundId -le 0) { return $false }
+    if ($foregroundId -eq $PID) { return $true }
+    return (Get-Process -Id $foregroundId -ErrorAction Stop).ProcessName -ieq 'CodexDreamSkinManager'
+  } catch {
+    return $false
+  }
 }

@@ -133,7 +133,7 @@ function Get-NetTCPConnection {
   $script:cimListenerQueries += 1
   [pscustomobject]@{ LocalAddress = '127.0.0.1'; LocalPort = $LocalPort; OwningProcess = 4242 }
 }
-$script:DreamSkinListenerLookupUnavailable = $true
+$script:DreamSkinNativeHelpersUnavailable = $true
 try {
   $fallbackRows = @(Get-DreamSkinPortListeners -Port 9335)
   Assert-Equal 1 $script:cimListenerQueries 'The listener query must fall back to Get-NetTCPConnection.'
@@ -143,7 +143,7 @@ try {
   }
   Assert-Equal 1 $script:cimProcessQueries 'The owner path must fall back to Win32_Process.'
 } finally {
-  $script:DreamSkinListenerLookupUnavailable = $false
+  $script:DreamSkinNativeHelpersUnavailable = $false
 }
 
 # A listener that is not bound to loopback is never trusted, whoever owns it.

@@ -49,6 +49,18 @@ namespace CodexDreamSkinManager
             Run("Healthy image apply reuses the running injector", delegate {
                 AssertApplyFlow(true, false, true, false, "apply", true);
             });
+            Run("Reports a skin waiting for a hidden Codex window as applied with a hint", delegate {
+                AssertApplyFlow(false, false, true, false, "check,apply,start", true,
+                    pendingVisibility: true, expectedMessage: "主题已应用：Candidate。" + MainWindow.PendingVisibilityNote);
+                AssertApplyFlow(false, false, true, false, "check,apply,start", true,
+                    expectedMessage: "主题已应用：Candidate");
+                AssertTrue(DreamSkinService.ReportsPendingVisibility(
+                    "Codex Dream Skin is active on verified loopback port 9335.\r\n" +
+                    "DREAM_SKIN_PENDING_VISIBILITY: the skin is applied and appears once the Codex window is shown.\r\n"));
+                AssertTrue(!DreamSkinService.ReportsPendingVisibility("Codex Dream Skin is active on verified loopback port 9335."));
+                AssertTrue(!DreamSkinService.ReportsPendingVisibility("note: DREAM_SKIN_PENDING_VISIBILITY: inside another line"));
+                AssertTrue(!DreamSkinService.ReportsPendingVisibility(null));
+            });
             Run("Cold image apply publishes before starting native appearance", delegate {
                 AssertApplyFlow(false, false, true, false, "check,apply,start", true);
             });
@@ -1826,7 +1838,7 @@ namespace CodexDreamSkinManager
 
         private static void AssertApplyFlow(bool running, bool video, bool consent, bool reject,
             string expectedEvents, bool published, bool failConnect = false, bool lostConnection = false,
-            bool failLiveApply = false)
+            bool failLiveApply = false, bool pendingVisibility = false, string expectedMessage = null)
         {
             string root = CreateLayout();
             string scripts = Path.Combine(root, "windows", "scripts");
@@ -1842,6 +1854,7 @@ namespace CodexDreamSkinManager
             if (failConnect) File.WriteAllText(Path.Combine(scripts, "fail-connect"), "yes");
             if (lostConnection) File.WriteAllText(Path.Combine(scripts, "restart-required"), "yes");
             if (failLiveApply) File.WriteAllText(Path.Combine(scripts, "fail-live-apply"), "yes");
+            if (pendingVisibility) File.WriteAllText(Path.Combine(scripts, "pending-visibility"), "yes");
             File.WriteAllText(Path.Combine(scripts, "start-dream-skin.ps1"), @"
 param([switch]$CheckOnly,[switch]$ConnectOnly,[switch]$RestartExisting)
 $ErrorActionPreference = 'Stop'
@@ -1861,6 +1874,10 @@ if ($ConnectOnly) {
 if ((Get-Content (Join-Path $PSScriptRoot 'active.txt') -Raw).Trim() -ne 'candidate') { throw 'Started with old theme' }
 if ((Test-Path (Join-Path $PSScriptRoot 'video')) -and -not $RestartExisting) { throw 'Final video startup lost restart consent' }
 Add-Content $log 'start'
+Write-Host 'Codex Dream Skin is active on verified loopback port 9335.'
+if (Test-Path (Join-Path $PSScriptRoot 'pending-visibility')) {
+  Write-Host 'DREAM_SKIN_PENDING_VISIBILITY: the skin is applied and appears once the Codex window is shown.'
+}
 ");
             File.WriteAllText(Path.Combine(scripts, "manager-actions.ps1"), @"
 param($Action,$SkillRoot,$ThemeDirectory,[switch]$DeferLiveApply,[switch]$Quick,[switch]$SkipThemes)
@@ -1887,6 +1904,8 @@ if (Test-Path (Join-Path $PSScriptRoot 'fail-live-apply')) {
                     return consent;
                 });
                 SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(window.Dispatcher));
+                string finalMessage = null;
+                window.OperationFinished += delegate(string message, bool error) { finalMessage = message; };
                 ListBox themes = GetPrivateField<ListBox>(window, "themeList");
                 themes.Items.Add(new ThemeOption { Id = "candidate", Name = "Candidate",
                     ThemeDirectory = root, ImagePath = Path.Combine(root, video ? "art.mp4" : "art.png") });
@@ -1896,6 +1915,11 @@ if (Test-Path (Join-Path $PSScriptRoot 'fail-live-apply')) {
                 WaitForTask(operationTask, window.Dispatcher);
                 AssertEqual(expectedEvents, string.Join(",", File.ReadAllLines(log)));
                 AssertEqual(published ? "candidate" : "previous", File.ReadAllText(active).Trim());
+                if (expectedMessage != null)
+                {
+                    if (!string.Equals(expectedMessage, finalMessage, StringComparison.Ordinal))
+                        throw new Exception("Expected message '" + expectedMessage + "', got '" + finalMessage + "'.");
+                }
             }
             finally
             {

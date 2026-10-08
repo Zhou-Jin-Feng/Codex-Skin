@@ -6,8 +6,10 @@ import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import {
   SKIN_VERSION,
+  oneShotExitCode,
   verifyAppliedSession,
   verifySession,
+  waitForVerifiedSession,
 } from "../scripts/injector.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -463,6 +465,120 @@ test("hidden documents and unreasonable viewports cannot pass", async () => {
   assert.equal(tiny.result.readiness.viewportPass, false);
 });
 
+test("a complete renderer that is only hidden is reported as pending visibility", async () => {
+  const hidden = await verify({ dom: makeDomFixture({ visibilityState: "hidden", hidden: true }) });
+  assert.equal(hidden.result.pass, false);
+  assert.equal(hidden.result.pendingVisibility, true,
+    "A hidden window with the whole skin laid out only waits for visibility.");
+
+  const visible = await verify();
+  assert.equal(visible.result.pass, true);
+  assert.equal(visible.result.pendingVisibility, false);
+
+  const hiddenIncomplete = await verify({
+    dom: makeDomFixture({ visibilityState: "hidden", hidden: true, shell: makeElement({ rect: makeRect(0, 0) }) }),
+  });
+  assert.equal(hiddenIncomplete.result.pendingVisibility, false,
+    "A hidden renderer that still misses its structure is not complete.");
+
+  const hiddenTiny = await verify({
+    dom: makeDomFixture({ visibilityState: "hidden", hidden: true, viewportWidth: 1, viewportHeight: 1 }),
+  });
+  assert.equal(hiddenTiny.result.pendingVisibility, false,
+    "A collapsed viewport is not a laid-out skin waiting to be shown.");
+
+  const hiddenOtherTheme = await verifySession(
+    makeSession({ dom: makeDomFixture({ visibilityState: "hidden", hidden: true }) }),
+    "page-main",
+    "another-theme",
+    "fixture-revision",
+  );
+  assert.equal(hiddenOtherTheme.pendingVisibility, false,
+    "A hidden renderer still showing another theme is not the requested skin.");
+
+  const hiddenUnboundWindow = await verify({
+    bindingError: new Error("Target window unavailable"),
+    dom: makeDomFixture({ visibilityState: "hidden", hidden: true }),
+  });
+  assert.equal(hiddenUnboundWindow.result.pendingVisibility, false,
+    "A hidden page whose window lookup failed outright may never be shown.");
+
+  const hiddenUnsupportedWindowApi = await verify({
+    bindingError: new Error("No window with given target found (-32000)"),
+    dom: makeDomFixture({ visibilityState: "hidden", hidden: true }),
+  });
+  assert.equal(hiddenUnsupportedWindowApi.result.pendingVisibility, true,
+    "Builds that never expose the window binding still report a complete hidden skin.");
+});
+
+test("exit code 4 needs the opt-in and a settled hidden skin on every unverified target", () => {
+  const passed = { result: { pass: true } };
+  const settled = { result: { pass: false, pendingVisibility: true, hiddenSettled: true } };
+  const sample = { result: { pass: false, pendingVisibility: true } };
+  const broken = { result: { pass: false, pendingVisibility: false } };
+  const errored = { error: "socket closed" };
+  const optIn = { mode: "verify", acceptHidden: true };
+  assert.equal(oneShotExitCode([passed], optIn), 0);
+  assert.equal(oneShotExitCode([settled], optIn), 4);
+  assert.equal(oneShotExitCode([passed, settled], optIn), 4, "A visible window plus a hidden complete one.");
+  assert.equal(oneShotExitCode([settled], { mode: "verify" }), 2, "Without the opt-in nothing changes.");
+  assert.equal(oneShotExitCode([sample], optIn), 2, "A single hidden sample at the deadline is not settled.");
+  assert.equal(oneShotExitCode([settled, broken], optIn), 2);
+  assert.equal(oneShotExitCode([settled, errored], optIn), 2);
+  assert.equal(oneShotExitCode([], optIn), 2);
+  assert.equal(oneShotExitCode([{ result: true }], { mode: "remove", acceptHidden: true }), 0);
+  assert.equal(oneShotExitCode([settled], { mode: "remove", acceptHidden: true }), 2,
+    "Removal never accepts a hidden renderer.");
+});
+
+test("startup verification stops waiting for a complete renderer the user keeps hidden", async () => {
+  const hiddenDom = makeDomFixture({ visibilityState: "hidden", hidden: true });
+  const acceptedAt = Date.now();
+  const accepted = await waitForVerifiedSession(
+    makeSession({ dom: hiddenDom }), "page-main", 8000, "fixture-theme", "fixture-revision", 600,
+  );
+  assert.equal(accepted.pass, false);
+  assert.equal(accepted.pendingVisibility, true);
+  assert.equal(accepted.hiddenSettled, true);
+  assert.ok(Date.now() - acceptedAt < 4000,
+    "An opted-in caller must not wait out the whole budget for a hidden window.");
+
+  const strictAt = Date.now();
+  const strict = await waitForVerifiedSession(
+    makeSession({ dom: hiddenDom }), "page-main", 1200, "fixture-theme", "fixture-revision",
+  );
+  assert.equal(strict.pass, false);
+  assert.notEqual(strict.hiddenSettled, true);
+  assert.ok(Date.now() - strictAt >= 1100, "Without the opt-in a hidden window keeps the old full wait.");
+
+  const shortBudget = await waitForVerifiedSession(
+    makeSession({ dom: hiddenDom }), "page-main", 700, "fixture-theme", "fixture-revision", 3000,
+  );
+  assert.equal(shortBudget.pendingVisibility, true);
+  assert.notEqual(shortBudget.hiddenSettled, true,
+    "A budget shorter than the settle time must not settle a hidden skin.");
+
+  const incompleteAt = Date.now();
+  const incomplete = await waitForVerifiedSession(
+    makeSession({
+      dom: makeDomFixture({ visibilityState: "hidden", hidden: true, shell: makeElement({ rect: makeRect(0, 0) }) }),
+    }),
+    "page-main", 1200, "fixture-theme", "fixture-revision", 300,
+  );
+  assert.equal(incomplete.pendingVisibility, false);
+  assert.ok(Date.now() - incompleteAt >= 1100, "An incomplete hidden renderer keeps waiting for its structure.");
+
+  const shownDom = makeDomFixture({ visibilityState: "hidden", hidden: true });
+  setTimeout(() => {
+    shownDom.document.visibilityState = "visible";
+    shownDom.document.hidden = false;
+  }, 300);
+  const shown = await waitForVerifiedSession(
+    makeSession({ dom: shownDom }), "page-main", 8000, "fixture-theme", "fixture-revision", 5000,
+  );
+  assert.equal(shown.pass, true, "A window shown while waiting must still pass normally.");
+});
+
 test("horizontal document overflow cannot be reported as a verified skin", async () => {
   const boundary = await verify({
     dom: makeDomFixture({ scrollWidth: 1280 }),
@@ -543,9 +659,26 @@ test("start cannot announce active after renderer verification exhausts its dead
   const rethrow = source.indexOf("throw $startupError", stateCleanup);
   const activeMessage = source.indexOf('Write-Host "Codex Dream Skin is active', rethrow);
   assert.ok(verifyStart >= 0 && successBreak > verifyStart,
-    "Startup must only leave the verify loop on a zero injector exit code.");
+    "Startup must only leave the verify loop on success or the pending-visibility outcome it asked for.");
   assert.ok(failureThrow > successBreak && startupCatch > failureThrow,
     "A nonzero verify result must reach the startup rollback after its bounded retry window.");
   assert.ok(stateCleanup > startupCatch && rethrow > stateCleanup && activeMessage > rethrow,
     "Verification failure must clear transient state and rethrow before the active message.");
+});
+
+test("start accepts a hidden but complete renderer only when it asked for that outcome", async () => {
+  const source = await fs.readFile(startPath, "utf8");
+  const verifyStart = source.indexOf("$verifyDeadline =");
+  const verifyCall = source.indexOf("'--verify', '--accept-hidden'", verifyStart);
+  const verifyFour = source.indexOf("if ($verify.ExitCode -eq 4) {", verifyCall);
+  const verifyPending = source.indexOf("$verifiedPendingVisibility = $true", verifyFour);
+  const onceCall = source.indexOf("'--once', '--accept-hidden'", verifyPending);
+  const oncePending = source.indexOf(
+    "if ($once.ExitCode -eq 4) { $verifiedPendingVisibility = $true; break }", onceCall);
+  assert.ok(verifyStart >= 0 && verifyCall > verifyStart && verifyFour > verifyCall && verifyPending > verifyFour,
+    "The startup verify must opt in before treating exit code 4 as applied.");
+  assert.ok(onceCall > verifyPending && oncePending > onceCall,
+    "The forced apply must opt in before treating exit code 4 as applied.");
+  assert.equal(source.split("--accept-hidden").length - 1, 2,
+    "Only the startup verify and its forced apply may accept a hidden window.");
 });

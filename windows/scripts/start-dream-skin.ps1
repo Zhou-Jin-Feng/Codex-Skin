@@ -65,6 +65,36 @@ function Test-DreamSkinRenderedVerificationOutput {
   return $false
 }
 
+# verify.log keeps only the latest attempt. Failed attempts are appended here
+# as well, so a slow startup can still be explained after a later success.
+function Add-DreamSkinVerifyFailureRecord {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Stage,
+    [AllowNull()][object]$Result
+  )
+  try {
+    if (-not [System.IO.Directory]::Exists([System.IO.Path]::GetDirectoryName($Path))) { return }
+  } catch { return }
+  # A rotation that fails (for example a reader holding the old file) must not
+  # cost the record itself.
+  try {
+    $existing = New-Object System.IO.FileInfo($Path)
+    if ($existing.Exists -and $existing.Length -gt 262144) {
+      $rotated = $Path + '.1'
+      if ([System.IO.File]::Exists($rotated)) { [System.IO.File]::Delete($rotated) }
+      [System.IO.File]::Move($Path, $rotated)
+    }
+  } catch {}
+  try {
+    $stamp = [DateTimeOffset]::Now.ToString('yyyy-MM-ddTHH:mm:ss.fffzzz', [System.Globalization.CultureInfo]::InvariantCulture)
+    $exitCode = if ($null -ne $Result) { "$($Result.ExitCode)" } else { 'unknown' }
+    $body = if ($null -ne $Result) { (@($Result.Output) | ForEach-Object { "$_" }) -join "`r`n" } else { '' }
+    [System.IO.File]::AppendAllText($Path, "=== $stamp $Stage (exit $exitCode)`r`n$body`r`n",
+      (New-Object System.Text.UTF8Encoding($false)))
+  } catch {}
+}
+
 $StateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
 $ConfigPath = Join-Path $HOME '.codex\config.toml'
 $BackupPath = Join-Path $StateRoot 'config.before-dream-skin.toml'
@@ -100,6 +130,7 @@ try {
   $StdoutPath = Join-Path $StateRoot 'injector.log'
   $StderrPath = Join-Path $StateRoot 'injector-error.log'
   $VerifyPath = Join-Path $StateRoot 'verify.log'
+  $VerifyFailurePath = Join-Path $StateRoot 'verify-failures.log'
   if (-not $CheckOnly) {
     $themePaths = Initialize-DreamSkinThemeStore -SkillRoot (Split-Path -Parent $PSScriptRoot) -StateRoot $StateRoot
   }
@@ -223,6 +254,9 @@ try {
   # Set by the verify loop when the renderer reports a visible, structurally
   # complete skin even though verification did not pass overall.
   $skinLooksRendered = $false
+  # Set when the skin is installed and laid out but the Codex window is not
+  # visible yet (minimized or covered by another full-screen window).
+  $verifiedPendingVisibility = $false
   try {
     if ($pendingAppearanceTransaction) {
       $startFailureCategory = 'state-reconciliation-failed'
@@ -556,6 +590,7 @@ try {
     # watcher keeps applying in the background, so retry until a deadline.
     $verifyDeadline = (Get-Date).AddSeconds(90)
     $forceInjectedAfterVerifyFailure = $false
+    $activatedForHiddenWindow = $false
     while ($true) {
       # Share the startup verification deadline across retries and the fallback
       # injection. The injector reserves up to one second for socket cleanup.
@@ -563,12 +598,30 @@ try {
       if ($remainingVerifyMs -lt 250) { throw "Dream Skin verification failed. See $VerifyPath" }
       $verifyTimeoutMs = [Math]::Min(30000, $remainingVerifyMs)
       $verify = Invoke-DreamSkinNative -FilePath $node.Path -ArgumentList @(
-        $Injector, '--verify', '--port', "$Port",
+        $Injector, '--verify', '--accept-hidden', '--port', "$Port",
         '--browser-id', $cdpIdentity.BrowserId, '--theme-dir', $themePaths.Active,
         '--timeout-ms', "$verifyTimeoutMs")
       Write-DreamSkinUtf8FileAtomically -Path $VerifyPath -Content (($verify.Output -join "`r`n") + "`r`n")
       Write-DreamSkinTimingMark -Stage "verify attempt (exit $($verify.ExitCode))"
       if ($verify.ExitCode -eq 0) { break }
+      # Exit code 4: the skin is installed and laid out, and only the Codex
+      # window is not visible (minimized, or covered by a game the user switched
+      # to). Waiting cannot change that and a rollback would close a working
+      # Codex, so report the theme as applied and visible once shown. While the
+      # user is looking at Dream Skin itself, show Codex and verify once more.
+      if ($verify.ExitCode -eq 4) {
+        # The extra verify needs room in the shared budget; running out there
+        # would turn an applied skin into a rollback.
+        $budgetLeftMs = [int]($verifyDeadline - (Get-Date)).TotalMilliseconds - 1000
+        if (-not $activatedForHiddenWindow -and $budgetLeftMs -gt 8000 -and (Test-DreamSkinCodexActivationAllowed)) {
+          $activatedForHiddenWindow = $true
+          try { [void](Invoke-DreamSkinCodexWindowActivation -Codex $codex) } catch {}
+          continue
+        }
+        $verifiedPendingVisibility = $true
+        break
+      }
+      Add-DreamSkinVerifyFailureRecord -Path $VerifyFailurePath -Stage 'verify' -Result $verify
       # A verify can fail while the theme is demonstrably on screen: the
       # renderer reports the document visible, the viewport sized and the shell
       # structure present, and only the native-window probe -- which some Codex
@@ -582,12 +635,14 @@ try {
       }
       if (-not $forceInjectedAfterVerifyFailure) {
         $forceInjectedAfterVerifyFailure = $true
-        try { [void](Invoke-DreamSkinCodexWindowActivation -Codex $codex) } catch {}
+        if (Test-DreamSkinCodexActivationAllowed) {
+          try { [void](Invoke-DreamSkinCodexWindowActivation -Codex $codex) } catch {}
+        }
         $remainingVerifyMs = [int]($verifyDeadline - (Get-Date)).TotalMilliseconds - 1000
         if ($remainingVerifyMs -lt 250) { throw "Dream Skin verification failed. See $VerifyPath" }
         $onceTimeoutMs = [Math]::Min(15000, $remainingVerifyMs)
         $once = Invoke-DreamSkinNative -FilePath $node.Path -ArgumentList @(
-          $Injector, '--once', '--port', "$Port",
+          $Injector, '--once', '--accept-hidden', '--port', "$Port",
           '--browser-id', $cdpIdentity.BrowserId, '--theme-dir', $themePaths.Active,
           '--timeout-ms', "$onceTimeoutMs")
         Write-DreamSkinUtf8FileAtomically -Path $VerifyPath -Content (
@@ -598,12 +653,18 @@ try {
         }
         Write-DreamSkinTimingMark -Stage "forced apply after verify failure (exit $($once.ExitCode))"
         if ($once.ExitCode -eq 0) { break }
+        if ($once.ExitCode -eq 4) { $verifiedPendingVisibility = $true; break }
+        Add-DreamSkinVerifyFailureRecord -Path $VerifyFailurePath -Stage 'forced apply' -Result $once
       }
       if ($daemon.HasExited) { throw "The injector exited during startup. See $StderrPath" }
       if ((Get-Date) -ge $verifyDeadline) { throw "Dream Skin verification failed. See $VerifyPath" }
       Start-Sleep -Seconds 1
     }
-    Write-DreamSkinTimingMark -Stage 'renderer verified'
+    Write-DreamSkinTimingMark -Stage $(if ($verifiedPendingVisibility) {
+      'renderer verified (pending visibility)'
+    } else {
+      'renderer verified'
+    })
     if ($null -ne $appearanceTransaction) {
       Complete-DreamSkinAppearanceTransaction `
         -BackupPath $BackupPath -Transaction $appearanceTransaction
@@ -732,6 +793,10 @@ try {
   }
 
   Write-Host "Codex Dream Skin is active on verified loopback port $Port."
+  # The manager reads this line to tell the user the skin waits for the window.
+  if ($verifiedPendingVisibility) {
+    Write-Host 'DREAM_SKIN_PENDING_VISIBILITY: the skin is applied and appears once the Codex window is shown.'
+  }
   if ($ResultToken) {
     Write-DreamSkinStartResult -StateRoot $StateRoot -Token $ResultToken `
       -Outcome 'success' -Category 'none' -AppearanceRecovery $appearanceRecovery

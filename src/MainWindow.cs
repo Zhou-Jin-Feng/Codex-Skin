@@ -180,6 +180,9 @@ namespace CodexDreamSkinManager
         private bool initialRefreshStarted;
         private bool exitRequested;
         private OperationTimer operationTimer;
+        // Appended to the success message of the running operation.
+        private string operationSuccessNote;
+        internal const string PendingVisibilityNote = "Codex 窗口在后台，切换回去即可看到皮肤。";
 
         private readonly Func<string, bool> restartConfirmation;
 
@@ -1423,7 +1426,7 @@ namespace CodexDreamSkinManager
                         throw new OperationCanceledException("主题已保存，已取消恢复连接；尚未确认皮肤显示。请重新应用主题。");
                     }
                     SetMessage("正在连接皮肤服务并确认显示...", false);
-                    await service.StartAsync(reconnectAuthorized);
+                    await StartSkinAsync(reconnectAuthorized);
                     SetExpectedRuntimeState(true, false);
                     return;
                 }
@@ -1435,7 +1438,7 @@ namespace CodexDreamSkinManager
                     if (!ConfirmThemeRecoveryRestart(theme.Name))
                         throw new OperationCanceledException("已取消操作，未切换主题或重启 Codex。");
                     SetMessage("正在恢复连接并应用主题，最长等待 5 分钟...", false);
-                    await service.ApplyThemeAndRecoverAsync(theme);
+                    if (await service.ApplyThemeAndRecoverAsync(theme)) operationSuccessNote = PendingVisibilityNote;
                 }
                 else
                 {
@@ -1474,7 +1477,7 @@ namespace CodexDreamSkinManager
                             }
                         }
                         SetMessage("正在连接皮肤服务并确认显示...", false);
-                        await service.StartAsync(restartAuthorized);
+                        await StartSkinAsync(restartAuthorized);
                     }
                 }
                 SetExpectedRuntimeState(true, false);
@@ -1536,10 +1539,10 @@ namespace CodexDreamSkinManager
                 bool restartAuthorized = await ConfirmStartupIfRequiredAsync("启用皮肤", false);
                 if (restartAuthorized || !currentStatus.IsRunning ||
                     string.Equals(currentStatus.StatusKind, "degraded", StringComparison.OrdinalIgnoreCase))
-                    await service.StartAsync(restartAuthorized);
+                    await StartSkinAsync(restartAuthorized);
                 else if (currentStatus.IsPaused)
                 {
-                    if (!await service.SetPausedAsync(false)) await service.StartAsync(restartAuthorized);
+                    if (!await service.SetPausedAsync(false)) await StartSkinAsync(restartAuthorized);
                 }
                 SetExpectedRuntimeState(true, false);
             }, "皮肤已启用。", true, "启用皮肤");
@@ -1588,9 +1591,9 @@ namespace CodexDreamSkinManager
                     bool restartAuthorized = await ConfirmStartupIfRequiredAsync("继续皮肤", false);
                     if (restartAuthorized || !currentStatus.IsRunning ||
                         string.Equals(currentStatus.StatusKind, "degraded", StringComparison.OrdinalIgnoreCase))
-                        await service.StartAsync(restartAuthorized);
+                        await StartSkinAsync(restartAuthorized);
                     else if (!await service.SetPausedAsync(false))
-                        await service.StartAsync(restartAuthorized);
+                        await StartSkinAsync(restartAuthorized);
                     SetExpectedRuntimeState(true, false);
                 }
                 else
@@ -1633,7 +1636,7 @@ namespace CodexDreamSkinManager
                 await service.ImportThemeAsync(options, !apply);
                 if (apply)
                 {
-                    await service.StartAsync(true);
+                    await StartSkinAsync(true);
                     SetExpectedRuntimeState(true, false);
                 }
             }, apply ? "自定义主题已保存并应用。" : "自定义主题已保存。");
@@ -1704,6 +1707,11 @@ namespace CodexDreamSkinManager
             return RunNamedOperationAsync(action, success, reloadThemes, null);
         }
 
+        private async Task StartSkinAsync(bool restartExisting)
+        {
+            if (await service.StartAsync(restartExisting)) operationSuccessNote = PendingVisibilityNote;
+        }
+
         // Returns true only when the action completed without error or cancellation.
         private async Task<bool> RunNamedOperationAsync(Func<Task> action, string success, bool reloadThemes,
             string operationName)
@@ -1711,6 +1719,7 @@ namespace CodexDreamSkinManager
             if (operationRunning || statusRefreshCount > 0 || service == null) return false;
             operationRunning = true;
             operationTimer = new OperationTimer(operationName ?? success);
+            operationSuccessNote = null;
             UpdateActionState();
             SetMessage("正在执行...", false);
             string finalMessage = success;
@@ -1720,6 +1729,8 @@ namespace CodexDreamSkinManager
             {
                 await action();
                 operationTimer.Mark("action completed");
+                if (!string.IsNullOrEmpty(operationSuccessNote))
+                    finalMessage = success + (success.EndsWith("。", StringComparison.Ordinal) ? "" : "。") + operationSuccessNote;
             }
             catch (OperationCanceledException ex)
             {
