@@ -1443,12 +1443,7 @@ namespace CodexDreamSkinManager
                 else
                 {
                     bool video = string.Equals(Path.GetExtension(theme.ImagePath), ".mp4", StringComparison.OrdinalIgnoreCase);
-                    bool needsStart = !currentStatus.IsRunning ||
-                        string.Equals(currentStatus.StatusKind, "degraded", StringComparison.OrdinalIgnoreCase);
-                    // The quick status only inspects the injector process. When
-                    // Codex itself runs without the debugging endpoint, a live
-                    // apply cannot succeed: go straight to the restart consent.
-                    if (session.RestartCertain) needsStart = true;
+                    bool needsStart = NeedsStartBeforeApply(currentStatus, session);
                     // A video connection is temporary: after validation startup
                     // closes it to install the selected theme's native appearance.
                     bool restartAuthorized = false;
@@ -1705,6 +1700,17 @@ namespace CodexDreamSkinManager
         private Task<bool> RunOperationAsync(Func<Task> action, string success, bool reloadThemes = true)
         {
             return RunNamedOperationAsync(action, success, reloadThemes, null);
+        }
+
+        // The quick status only inspects the injector process, which can outlive
+        // Codex. With nothing listening on the recorded debugging port a live
+        // apply cannot succeed, whether Codex runs without the port (restart
+        // consent follows) or does not run at all: start it instead.
+        internal static bool NeedsStartBeforeApply(DreamSkinStatus status, LiveSessionReport session)
+        {
+            return !status.IsRunning ||
+                string.Equals(status.StatusKind, "degraded", StringComparison.OrdinalIgnoreCase) ||
+                (session != null && session.State == LiveSessionState.BrowserUnreachable);
         }
 
         private async Task StartSkinAsync(bool restartExisting)

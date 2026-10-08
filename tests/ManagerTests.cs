@@ -1788,6 +1788,22 @@ namespace CodexDreamSkinManager
                 AssertEqual("已保存主题", cleaned);
             });
 
+            Run("Starts instead of live-applying when nothing listens on the debugging port", delegate
+            {
+                DreamSkinStatus running = new DreamSkinStatus { IsRunning = true, StatusKind = "running" };
+                // The injector outlived Codex: no port, Codex closed or open without it.
+                AssertTrue(MainWindow.NeedsStartBeforeApply(running,
+                    new LiveSessionReport { State = LiveSessionState.BrowserUnreachable, CodexRunning = false }));
+                AssertTrue(MainWindow.NeedsStartBeforeApply(running,
+                    new LiveSessionReport { State = LiveSessionState.BrowserUnreachable, CodexRunning = true }));
+                // Something listens but is unverified: the apply script decides.
+                AssertTrue(!MainWindow.NeedsStartBeforeApply(running, new LiveSessionReport()));
+                AssertTrue(!MainWindow.NeedsStartBeforeApply(running, null));
+                AssertTrue(MainWindow.NeedsStartBeforeApply(new DreamSkinStatus(), new LiveSessionReport()));
+                AssertTrue(MainWindow.NeedsStartBeforeApply(
+                    new DreamSkinStatus { IsRunning = true, StatusKind = "degraded" }, new LiveSessionReport()));
+            });
+
             Run("Live session probe treats a closed debugging port as unreachable before verifying", delegate
             {
                 AssertTrue(LiveSessionProbe.Classify(false,
